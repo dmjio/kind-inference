@@ -265,22 +265,11 @@ dumpKindEnv = do
     putStrLn $ name <> " : " <> showScheme mv
 
 metaVarBind :: MetaVar -> Kind -> Infer Subst
-metaVarBind m k1 = do
-  subs <- gets substitutions
-  case (M.lookup m subs, k1) of
-    (Just k2, _) ->
-      unify k1 k2
-    (Nothing, KindMetaVar mv) ->
-      case M.lookup mv subs of
-        Just found ->
-          unify (KindMetaVar m) found
-        Nothing -> do
-          replaceSubs m k1
-          pure (M.singleton m k1)
-    (Nothing, _) -> do
-      occursCheck m k1
-      replaceSubs m k1
-      pure (M.singleton m k1)
+metaVarBind mv (KindMetaVar m) | mv == m = pure mempty
+metaVarBind m k = do
+  occursCheck m k
+  replaceSubs m k
+  pure (M.singleton m k)
 
 replaceSubs :: MetaVar -> Kind -> Infer ()
 replaceSubs m k = modify $ \s -> s {
