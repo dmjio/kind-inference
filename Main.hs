@@ -205,7 +205,7 @@ solveConstraints = do
       Equality k1 k2 : es -> do
         subs <- unify k1 k2
         extend subs
-        modify $ \s -> s { constraints = es }
+        modify $ \s -> s { constraints = replaceConstraintSub subs es }
         loop
 
 unify :: Kind -> Kind -> Infer Subst
@@ -284,12 +284,11 @@ metaVarBind m k1 = do
 
 replaceSubs :: MetaVar -> Kind -> Infer ()
 replaceSubs m k = modify $ \s -> s {
-    substitutions = M.map (replaceInState m k) (substitutions s)
+    substitutions = M.map replaceInState (substitutions s)
   } where
-      replaceInState :: MetaVar -> Kind -> Kind -> Kind
-      replaceInState mv x = cataKind $ \k ->
-        case k of
-          KindMetaVar mv' | mv' == mv -> x
+      replaceInState = cataKind $ \kind ->
+        case kind of
+          KindMetaVar mv | mv == m -> k
           z -> z
 
 occursCheck :: MetaVar -> Kind -> Infer ()
@@ -303,9 +302,13 @@ extend k = do
   modify $ \x -> x { substitutions = s `M.union` k }
 
 getKind :: MetaVar -> Infer Kind
-getKind mv =
-  M.findWithDefault (KindMetaVar mv) mv <$>
-    gets substitutions
+getKind mv = do
+  subs <- gets substitutions
+  case M.lookup mv subs of
+    Nothing -> pure (KindMetaVar mv)
+    Just (KindMetaVar m) ->
+      getKind m
+    Just k -> pure k
 
 substitute :: Decl MetaVar -> Infer (Decl Kind)
 substitute (TypeSyn mv name vars typ) = do
@@ -463,6 +466,19 @@ lookupTyCon con@(TyCon name) = do
           constrain v (KindMetaVar mv)
           pure v
 
+replaceConstraintSub :: Subst -> [Constraint] -> [Constraint]
+replaceConstraintSub = flip (M.foldrWithKey replaceConstraints)
+
+replaceConstraints :: MetaVar -> Kind -> [Constraint] -> [Constraint]
+replaceConstraints m k = fmap (replaceConstraint m k)
+
+replaceConstraint :: MetaVar -> Kind -> Constraint -> Constraint
+replaceConstraint m k (Equality l r) =
+  Equality (replaceConstraint m k l) (replaceConstraint m k r)
+    where
+      replaceConstraint m k (KindMetaVar mv) | m == mv = k
+      replaceConstraint m _ k = k
+
 lookupTyVar :: TyVar -> Infer MetaVar
 lookupTyVar var@(TyVar name) = do
   env <- gets env
@@ -484,7 +500,7 @@ instantiate (Scheme vars kind) = do
             case M.lookup v mapping of
               Nothing -> KindVar v
               Just mv -> KindMetaVar mv
-          replaceKind kind = kind
+          replaceKind kind' = kind'
 
 cataKind :: (Kind -> Kind) -> Kind -> Kind
 cataKind f Type =
@@ -509,13 +525,11 @@ instance Ann Decl where
   ann (TypeSyn x _ _ _) = x
 
 constrain :: MetaVar -> Kind -> Infer ()
-constrain m k = do
-  modify $ \e ->
-    e { constraints = Equality (KindMetaVar m) k : constraints e
-      }
+constrain m k = constrainKinds (KindMetaVar m) k
 
 constrainKinds :: Kind -> Kind -> Infer ()
 constrainKinds k1 k2 = do
+  dbg ("Constraining... " <> showKind k1 <> " = " <> showKind k2)
   modify $ \e ->
     e { constraints = Equality k1 k2 : constraints e
       }
@@ -540,7 +554,6 @@ generalizeDecl (TypeSyn k _ _ _) = generalize k
 generalize :: Kind -> Scheme
 generalize kind = Scheme allvars (cataKind quantify kind)
   where
-    -- you need to account for kind vars here too
     metavars = S.toList (metaVars kind)
     mapping = zip (sort metavars) [0..]
     subs = M.fromList mapping
