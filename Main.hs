@@ -526,17 +526,26 @@ metaVars (KindFun k1 k2) =
 metaVars (KindMetaVar t) = S.singleton t
 metaVars _ = mempty
 
+kindVars :: Kind -> Set KindVar
+kindVars (KindFun k1 k2) =
+  kindVars k1 `S.union` kindVars k2
+kindVars (KindVar t) = S.singleton t
+kindVars _ = mempty
+
+
 generalizeDecl :: Decl Kind -> Scheme
 generalizeDecl (Decl k _ _ _) = generalize k
 generalizeDecl (TypeSyn k _ _ _) = generalize k
 
 generalize :: Kind -> Scheme
-generalize kind = Scheme vars (cataKind quantify kind)
+generalize kind = Scheme allvars (cataKind quantify kind)
   where
+    -- you need to account for kind vars here too
     metavars = S.toList (metaVars kind)
     mapping = zip (sort metavars) [0..]
     subs = M.fromList mapping
     vars = [ MkKindVar (showKind v)| v <- snd <$> mapping ]
+    allvars = sort (S.toList (kindVars kind) ++ vars)
 
     quantify (KindMetaVar m) = KindVar (MkKindVar (showKind (subs M.! m)))
     quantify k = k
