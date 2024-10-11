@@ -474,10 +474,14 @@ replaceConstraints m k = fmap (replaceConstraint m k)
 
 replaceConstraint :: MetaVar -> Kind -> Constraint -> Constraint
 replaceConstraint m k (Equality l r) =
-  Equality (replaceConstraint m k l) (replaceConstraint m k r)
-    where
-      replaceConstraint m k (KindMetaVar mv) | m == mv = k
-      replaceConstraint m _ k = k
+  Equality (replaceKind m k l) (replaceKind m k r)
+
+replaceKind :: MetaVar -> Kind -> Kind -> Kind
+replaceKind m k = cataKind go
+  where
+    go :: Kind -> Kind
+    go (KindMetaVar v) | v == m = k
+    go j = j
 
 lookupTyVar :: TyVar -> Infer MetaVar
 lookupTyVar var@(TyVar name) = do
