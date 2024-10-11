@@ -59,6 +59,8 @@ data Type a
   | TypeApp a (Type a) (Type a)
   deriving (Show, Eq)
 
+(--->) = TypeApp ()
+
 newtype KindVar = MkKindVar { unKindVar :: String }
   deriving (Show, Eq, Ord)
 
@@ -82,6 +84,16 @@ showKindVar (KindVar (MkKindVar v))   = v
 showKindVar (KindMetaVar (MetaVar v)) = "{" <> show v <> "}"
 showKindVar Type                      = "*"
 showKindVar x                         = "(" <> showKind x <> ")"
+
+showType :: Type ann -> String
+showType (TypeApp ann f x@TypeApp{})
+  = "(" <> showType f <> " " <> showTypeVar x <> ")"
+showType (TypeApp ann f x) = showType f <> " " <> showTypeVar x
+showType t                 = showTypeVar t
+
+showTypeVar (TypeVar ann (TyVar v)) = v
+showTypeVar (TypeCon ann (TyCon c)) = c
+showTypeVar x                       = "(" <> showType x <> ")"
 
 showScheme :: Scheme -> String
 showScheme (Scheme [] k) = showKind k
@@ -184,40 +196,58 @@ showDecl (Decl ann n vars (x:xs)) =
 
 showVariant :: Variant ann -> String
 showVariant (Variant n []) = n
-showVariant (Variant n tvs)
-  = intercalate " " (n : fmap showType tvs)
-
-showType :: Type ann -> String
-showType (TypeApp ann f x) = "(" <> showType f <> " " <> showTypeVar x <> ")"
-showType t                 = showTypeVar t
-
-showTypeVar (TypeVar ann (TyVar v)) = v
-showTypeVar (TypeCon ann (TyCon c)) = c
-showTypeVar x                       = showType x
+showVariant (Variant n ts) = intercalate " " (n : fmap showType ts)
 
 solveConstraints :: Infer ()
 solveConstraints = do
   dbg "Solving..."
   fix $ \loop -> do
-    cs <- gets constraints
-    case cs of
-      [] -> pure ()
-      Equality k1 k2 : es -> do
-        modify $ \s -> s { constraints = es }
-        subs <- unify k1 k2
-        extend subs
-        es' <- gets constraints
-        modify $ \s -> s { constraints = replaceConstraintSub subs es' }
+    constraint <- getConstraint
+    case constraint of
+      Nothing -> do
+        dbg "Solving complete..."
+      Just (Equality k1 k2) -> do
+        mapM_ apply =<< unify k1 k2
         loop
+  where
+    apply (k,v) = do
+      updateSubstitution k v
+      updateConstraints k v
 
-unify :: Kind -> Kind -> Infer Subst
-unify Type Type = pure mempty
-unify (KindVar x) (KindVar y) | x == y = pure mempty
-unify (KindMetaVar x) (KindMetaVar y) | x == y = pure mempty
+updateConstraints :: MetaVar -> Kind -> Infer ()
+updateConstraints k v = do
+  cs <- replaceConstraints k v <$> gets constraints
+  modify $ \s -> s { constraints = cs }
+    where
+      replaceConstraints :: MetaVar -> Kind -> [Constraint] -> [Constraint]
+      replaceConstraints m k = fmap (replaceConstraint m k)
+        where
+          replaceConstraint :: MetaVar -> Kind -> Constraint -> Constraint
+          replaceConstraint m k (Equality l r) =
+            Equality (cataKind replaceKind l) (cataKind replaceKind r)
+              where
+                replaceKind :: Kind -> Kind
+                replaceKind (KindMetaVar v) | v == m = k
+                replaceKind kk = kk
+
+getConstraint :: Infer (Maybe Constraint)
+getConstraint = do
+  ccs <- gets constraints
+  case ccs of
+    c : cs -> do
+      modify $ \s -> s { constraints = cs }
+      pure (Just c)
+    [] ->
+      pure Nothing
+
+unify :: Kind -> Kind -> Infer (Maybe (MetaVar, Kind))
+unify Type Type = pure Nothing
+unify (KindVar x) (KindVar y) | x == y = pure Nothing
+unify (KindMetaVar x) (KindMetaVar y) | x == y = pure Nothing
 unify (KindFun x1 y1) (KindFun x2 y2) = do
   constrainKinds x1 x2
   constrainKinds y1 y2
-  pure mempty
+  pure Nothing
 unify (KindMetaVar x) y = metaVarBind x y
 unify x (KindMetaVar y) = metaVarBind y x
 unify k1 k2 = do
@@ -239,12 +269,12 @@ dumpSubs = do
   liftIO (putStrLn "\nDumping Substitutions...")
   subs <- gets substitutions
   liftIO $ putStrLn (showSubs subs)
+    where
+      showSub :: (MetaVar, Kind) -> String
+      showSub (k,v) = showMetaVar k <> " : " <> showKind v
 
-showSub :: (MetaVar,Kind) -> String
-showSub (k,v) = showMetaVar k <> " : " <> showKind v
-
-showSubs :: Subst -> String
-showSubs subst = intercalate "\n" (showSub <$> M.toList subst)
+      showSubs :: Subst -> String
+      showSubs subst = intercalate "\n" (showSub <$> M.toList subst)
 
 dumpConstraints :: Infer ()
 dumpConstraints = do
@@ -266,41 +296,33 @@ dumpKindEnv = do
   liftIO $ forM_ (M.assocs e) $ \(name, mv) ->
     putStrLn $ name <> " : " <> showScheme mv
 
-metaVarBind :: MetaVar -> Kind -> Infer Subst
-metaVarBind mv (KindMetaVar m) | mv == m = pure mempty
+metaVarBind :: MetaVar -> Kind -> Infer (Maybe (MetaVar, Kind))
+metaVarBind mv (KindMetaVar m) | mv == m = pure Nothing
 metaVarBind m k = do
   dbg ("metaVarBind " ++ showMetaVar m ++ " (" ++ showKind k ++ ")")
   occursCheck m k
-  replaceSubs m k
-  pure (M.singleton m k)
+  pure (Just (m, k))
 
-replaceSubs :: MetaVar -> Kind -> Infer ()
-replaceSubs m k = modify $ \s -> s {
-    substitutions = M.map replaceInState (substitutions s)
-  } where
-      replaceInState = cataKind $ \kind ->
-        case kind of
-          KindMetaVar mv | mv == m -> k
-          z                        -> z
+updateSubstitution :: MetaVar -> Kind -> Infer ()
+updateSubstitution m k = modifySub (M.insert m k . M.map replaceInState)
+  where
+    replaceInState = cataKind $ \kind ->
+      case kind of
+        KindMetaVar mv | mv == m -> k
+        z                        -> z
 
 occursCheck :: MetaVar -> Kind -> Infer ()
 occursCheck mv k = do
   when (mv `S.member` metaVars k) $
     throwError (OccursCheckFailed mv k)
 
-extend :: Subst -> Infer ()
-extend k = do
-  s <- gets substitutions
-  modify $ \x -> x { substitutions = s `M.union` k }
+modifySub :: (Subst -> Subst) -> Infer ()
+modifySub f = do
+  subs <- gets substitutions
+  modify $ \s -> s { substitutions = f subs }
 
 getKind :: MetaVar -> Infer Kind
-getKind mv = do
-  subs <- gets substitutions
-  case M.lookup mv subs of
-    Nothing -> pure (KindMetaVar mv)
-    Just (KindMetaVar m) ->
-      getKind m
-    Just k -> pure k
+getKind mv = M.findWithDefault (KindMetaVar mv) mv <$> gets substitutions
 
 substitute :: Decl MetaVar -> Infer (Decl Kind)
 substitute (TypeSyn mv name vars typ) = do
@@ -323,10 +345,10 @@ substituteType (TypeCon mv tyCon) = do
   kind <- getKind mv
   pure (TypeCon kind tyCon)
 substituteType (TypeApp mv f x) = do
-  TypeApp
-    <$> getKind mv
-    <*> substituteType f
-    <*> substituteType x
+  kind <- getKind mv
+  g <- substituteType f
+  y <- substituteType x
+  pure (TypeApp kind g y)
 substituteType (TypeVar mv t) = do
   kind <- getKind mv
   pure (TypeVar kind t)
@@ -334,15 +356,15 @@ substituteType (TypeVar mv t) = do
 emptyState :: InferState
 emptyState = InferState mempty defaultKindEnv mempty 0 []
 
-defaultKindEnv
-  = M.fromList
-    [ ("Int", Scheme [] Type)
-    , ("String", Scheme [] Type)
-    , ("Either", Scheme [] (Type --> Type --> Type))
-    , ("(->)", Scheme [] (Type --> Type --> Type))
-    , ("StateT", Scheme [] (Type --> (Type --> Type) --> Type --> Type))
-    , ("Identity", Scheme [] (Type --> Type))
-    ]
+defaultKindEnv :: Map String Scheme
+defaultKindEnv = M.fromList
+  [ ("Int", Scheme [] Type)
+  , ("String", Scheme [] Type)
+  , ("Either", Scheme [] (Type --> Type --> Type))
+  , ("(->)", Scheme [] (Type --> Type --> Type))
+  , ("StateT", Scheme [] (Type --> (Type --> Type) --> Type --> Type))
+  , ("Identity", Scheme [] (Type --> Type))
+  ]
 
 infixr 9 -->
 (-->) :: Kind -> Kind -> Kind
@@ -395,11 +417,9 @@ addToEnv k = do
   v <- fresh
   modifyEnv (M.insert k v)
   pure v
-    where
-      modifyEnv f =
-        modify $ \s -> s {
-          env = f (env s)
-        }
+
+modifyEnv :: (Map Name MetaVar -> Map Name MetaVar) -> Infer ()
+modifyEnv f = modify $ \s -> s { env = f (env s) }
 
 elaborateDecl :: Decl () -> Infer (Decl MetaVar)
 elaborateDecl decl = do
@@ -454,27 +474,7 @@ lookupTyCon con@(TyCon name) = do
       env <- gets env
       case M.lookup name env of
         Nothing -> throwError (UnboundName con)
-        Just v -> do
-          mv <- fresh
-          constrain v (KindMetaVar mv)
-          pure v
-
-replaceConstraintSub :: Subst -> [Constraint] -> [Constraint]
-replaceConstraintSub = flip (M.foldrWithKey replaceConstraints)
-
-replaceConstraints :: MetaVar -> Kind -> [Constraint] -> [Constraint]
-replaceConstraints m k = fmap (replaceConstraint m k)
-
-replaceConstraint :: MetaVar -> Kind -> Constraint -> Constraint
-replaceConstraint m k (Equality l r) =
-  Equality (replaceKind m k l) (replaceKind m k r)
-
-replaceKind :: MetaVar -> Kind -> Kind -> Kind
-replaceKind m k = cataKind go
-  where
-    go :: Kind -> Kind
-    go (KindMetaVar v) | v == m = k
-    go j = j
+        Just v -> pure v
 
 lookupTyVar :: TyVar -> Infer MetaVar
 lookupTyVar var@(TyVar name) = do
@@ -487,17 +487,13 @@ instantiate :: Scheme -> Infer Kind
 instantiate (Scheme vars kind) = do
   mvs <- replicateM (length vars) fresh
   let mapping = M.fromList (zip vars mvs)
-  pure (replace mapping kind)
+  pure (cataKind (replaceKind mapping) kind)
     where
-      replace :: Map KindVar MetaVar -> Kind -> Kind
-      replace mapping = cataKind replaceKind
-        where
-          replaceKind :: Kind -> Kind
-          replaceKind (KindVar v) =
-            case M.lookup v mapping of
-              Nothing -> KindVar v
-              Just mv -> KindMetaVar mv
-          replaceKind kind' = kind'
+      replaceKind mapping (KindVar v) =
+         case M.lookup v mapping of
+           Nothing -> KindVar v
+           Just mv -> KindMetaVar mv
+      replaceKind _ k = k
 
 cataKind :: (Kind -> Kind) -> Kind -> Kind
 cataKind f Type =
@@ -532,30 +528,21 @@ constrainKinds k1 k2 = do
       }
 
 metaVars :: Kind -> Set MetaVar
-metaVars (KindFun k1 k2) =
-  metaVars k1 `S.union` metaVars k2
+metaVars (KindFun k1 k2) = metaVars k1 `S.union` metaVars k2
 metaVars (KindMetaVar t) = S.singleton t
 metaVars _ = mempty
-
-kindVars :: Kind -> Set KindVar
-kindVars (KindFun k1 k2) =
-  kindVars k1 `S.union` kindVars k2
-kindVars (KindVar t) = S.singleton t
-kindVars _ = mempty
-
 
 generalizeDecl :: Decl Kind -> Scheme
 generalizeDecl (Decl k _ _ _)    = generalize k
 generalizeDecl (TypeSyn k _ _ _) = generalize k
 
 generalize :: Kind -> Scheme
-generalize kind = Scheme allvars (cataKind quantify kind)
+generalize kind = Scheme vars (cataKind quantify kind)
   where
     metavars = S.toList (metaVars kind)
     mapping = zip (sort metavars) [0..]
     subs = M.fromList mapping
-    vars = [ MkKindVar (showKind v)| v <- snd <$> mapping ]
-    allvars = sort (S.toList (kindVars kind) ++ vars)
+    vars = sort [ MkKindVar (showKind v)| v <- snd <$> mapping ]
 
     quantify (KindMetaVar m) = KindVar (MkKindVar (showKind (subs M.! m)))
     quantify k               = k
@@ -566,40 +553,35 @@ generalize kind = Scheme allvars (cataKind quantify kind)
 testInfer :: [Decl ()] -> IO ()
 testInfer decs = do
   dbg "Declarations..."
-  mapM_ (putStrLn . showDecl) decs
+  dbg $ intercalate "\n" (showDecl <$> decs)
   result <- inferDecls decs
   case result of
     Left err -> print err
     Right decls -> do
-      putStrLn "Inferred..."
+      dbg "Inferred..."
       forM_ decls $ \decl -> do
         let
           scheme = generalize (ann decl)
           name = getName decl
-        putStrLn ""
-        putStrLn $ showDecl decl
-        putStrLn $ name <> " :: " <> showScheme scheme
+        dbg $ showDecl decl
+        dbg $ name <> " :: " <> showScheme scheme
 
 main :: IO ()
-main =
-  testInfer [lol]
-  -- [ tree
-  -- , lol
-  -- , maybe
-  -- , person
-  -- , statet
-  -- , state
-  -- , thisthat
-  -- , proxy
-  -- ]
+main = testInfer
+  [ tree
+  , lol
+  , maybe
+  , person
+  , statet
+  , state
+  , thisthat
+  , proxy
+  , cofree
+  ]
 
--- ==== test fixtures
 int :: Decl ()
 int = Decl () "Int" [] [ Variant "Int" [] ]
 
--- data LOL a b = LOL (Either a b)
---
---
 lol :: Decl ()
 lol = Decl () "LOL" [ TyVar "a", TyVar "b" ]
   [ Variant "LOL" [ app (app (tCon "Either") (tVar "a")) (tVar "b") ]
@@ -636,27 +618,13 @@ treefail = Decl () "Tree" [ TyVar "a" ]
 
 state :: Decl ()
 state = TypeSyn () "State" [ TyVar "s", TyVar "a" ]
-  (app (app (app (tCon "StateT") (tVar "s")) (tCon "Identity")) (tVar "a"))
+  (tCon "StateT" ---> tVar "s" ---> tCon "Identity" ---> tVar "a")
 
 thisthat :: Decl ()
 thisthat = Decl () "ThisThat" [ TyVar "l", TyVar "r" ]
   [ Variant "This" [ tVar "l" ]
   , Variant "That" [ tVar "r" ]
   ]
-
-cofree :: Decl ()
-cofree = Decl () "Cofree" [ TyVar "a", TyVar "k" ]
-  [ Variant "Cofree"
-    [ tVar "k"
-    , app
-      (tVar "a")
-      (app
-        (app (tCon "Cofree") (tVar "a"))
-        (tVar "k"))
-    ]
-  ]
-
---
 
 tCon :: String -> Type ()
 tCon n = TypeCon () (TyCon n)
@@ -666,3 +634,12 @@ tVar n = TypeVar () (TyVar n)
 
 app :: Type () -> Type () -> Type ()
 app x y = TypeApp () x y
+
+cofree :: Decl ()
+cofree = Decl () "Cofree" [ TyVar "f", TyVar "a" ]
+  [ Variant "Cofree"
+    [ tVar "a"
+    , tVar "f" ---> (tCon "Cofree" ---> tVar "f" ---> tVar "a")
+    ]
+  ]
+
