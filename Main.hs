@@ -36,7 +36,7 @@ class GetName f where
   getName :: f -> Name
 
 instance GetName (Decl a) where
-  getName (Decl _ name _ _) = name
+  getName (Decl _ name _ _)    = name
   getName (TypeSyn _ name _ _) = name
 
 instance GetName (Type a) where
@@ -74,14 +74,14 @@ data Scheme = Scheme [KindVar] Kind
   deriving (Show, Eq)
 
 showKind :: Kind -> String
-showKind (KindFun f x) = showKind f <> " -> " <> showKindVar x
-showKind x = showKindVar x
+showKind (KindFun f x) = showKindVar f <> " -> " <> showKind x
+showKind x             = showKindVar x
 
 showKindVar :: Kind -> String
-showKindVar (KindVar (MkKindVar v)) = v
+showKindVar (KindVar (MkKindVar v))   = v
 showKindVar (KindMetaVar (MetaVar v)) = "{" <> show v <> "}"
-showKindVar Type = "*"
-showKindVar x = "(" <> showKind x <> ")"
+showKindVar Type                      = "*"
+showKindVar x                         = "(" <> showKind x <> ")"
 
 showScheme :: Scheme -> String
 showScheme (Scheme [] k) = showKind k
@@ -189,11 +189,11 @@ showVariant (Variant n tvs)
 
 showType :: Type ann -> String
 showType (TypeApp ann f x) = "(" <> showType f <> " " <> showTypeVar x <> ")"
-showType t = showTypeVar t
+showType t                 = showTypeVar t
 
 showTypeVar (TypeVar ann (TyVar v)) = v
 showTypeVar (TypeCon ann (TyCon c)) = c
-showTypeVar x = showType x
+showTypeVar x                       = showType x
 
 solveConstraints :: Infer ()
 solveConstraints = do
@@ -203,9 +203,11 @@ solveConstraints = do
     case cs of
       [] -> pure ()
       Equality k1 k2 : es -> do
+        modify $ \s -> s { constraints = es }
         subs <- unify k1 k2
         extend subs
-        modify $ \s -> s { constraints = replaceConstraintSub subs es }
+        es' <- gets constraints
+        modify $ \s -> s { constraints = replaceConstraintSub subs es' }
         loop
 
 unify :: Kind -> Kind -> Infer Subst
@@ -267,6 +269,7 @@ dumpKindEnv = do
 metaVarBind :: MetaVar -> Kind -> Infer Subst
 metaVarBind mv (KindMetaVar m) | mv == m = pure mempty
 metaVarBind m k = do
+  dbg ("metaVarBind " ++ showMetaVar m ++ " (" ++ showKind k ++ ")")
   occursCheck m k
   replaceSubs m k
   pure (M.singleton m k)
@@ -278,7 +281,7 @@ replaceSubs m k = modify $ \s -> s {
       replaceInState = cataKind $ \kind ->
         case kind of
           KindMetaVar mv | mv == m -> k
-          z -> z
+          z                        -> z
 
 occursCheck :: MetaVar -> Kind -> Infer ()
 occursCheck mv k = do
@@ -341,6 +344,7 @@ defaultKindEnv
     , ("Identity", Scheme [] (Type --> Type))
     ]
 
+infixr 9 -->
 (-->) :: Kind -> Kind -> Kind
 (-->) = KindFun
 
@@ -477,7 +481,7 @@ lookupTyVar var@(TyVar name) = do
   env <- gets env
   case M.lookup name env of
     Nothing -> throwError (UnboundVar var)
-    Just v -> pure v
+    Just v  -> pure v
 
 instantiate :: Scheme -> Infer Kind
 instantiate (Scheme vars kind) = do
@@ -509,12 +513,12 @@ class Ann a where
   ann :: a ann -> ann
 
 instance Ann Type where
-  ann (TypeVar x _) = x
-  ann (TypeCon x _) = x
+  ann (TypeVar x _)   = x
+  ann (TypeCon x _)   = x
   ann (TypeApp x _ _) = x
 
 instance Ann Decl where
-  ann (Decl x _ _ _) = x
+  ann (Decl x _ _ _)    = x
   ann (TypeSyn x _ _ _) = x
 
 constrain :: MetaVar -> Kind -> Infer ()
@@ -541,7 +545,7 @@ kindVars _ = mempty
 
 
 generalizeDecl :: Decl Kind -> Scheme
-generalizeDecl (Decl k _ _ _) = generalize k
+generalizeDecl (Decl k _ _ _)    = generalize k
 generalizeDecl (TypeSyn k _ _ _) = generalize k
 
 generalize :: Kind -> Scheme
@@ -554,7 +558,7 @@ generalize kind = Scheme allvars (cataKind quantify kind)
     allvars = sort (S.toList (kindVars kind) ++ vars)
 
     quantify (KindMetaVar m) = KindVar (MkKindVar (showKind (subs M.! m)))
-    quantify k = k
+    quantify k               = k
 
     showKind 0 = "k"
     showKind n = "k" <> show n
@@ -578,22 +582,24 @@ testInfer decs = do
 
 main :: IO ()
 main =
-  testInfer
-  [ tree
-  , lol
-  , maybe
-  , person
-  , statet
-  , state
-  , thisthat
-  , proxy
-  ]
+  testInfer [lol]
+  -- [ tree
+  -- , lol
+  -- , maybe
+  -- , person
+  -- , statet
+  -- , state
+  -- , thisthat
+  -- , proxy
+  -- ]
 
 -- ==== test fixtures
 int :: Decl ()
 int = Decl () "Int" [] [ Variant "Int" [] ]
 
--- data LOL = LOL (Either a b)
+-- data LOL a b = LOL (Either a b)
+--
+--
 lol :: Decl ()
 lol = Decl () "LOL" [ TyVar "a", TyVar "b" ]
   [ Variant "LOL" [ app (app (tCon "Either") (tVar "a")) (tVar "b") ]
@@ -660,4 +666,3 @@ tVar n = TypeVar () (TyVar n)
 
 app :: Type () -> Type () -> Type ()
 app x y = TypeApp () x y
-
