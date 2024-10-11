@@ -86,8 +86,6 @@ showKindVar Type                      = "*"
 showKindVar x                         = "(" <> showKind x <> ")"
 
 showType :: Type ann -> String
-showType (TypeApp ann f x@TypeApp{})
-  = "(" <> showType f <> " " <> showTypeVar x <> ")"
 showType (TypeApp ann f x) = showType f <> " " <> showTypeVar x
 showType t                 = showTypeVar t
 
@@ -196,7 +194,7 @@ showDecl (Decl ann n vars (x:xs)) =
 
 showVariant :: Variant ann -> String
 showVariant (Variant n []) = n
-showVariant (Variant n ts) = intercalate " " (n : fmap showType ts)
+showVariant (Variant n ts) = intercalate " " (n : fmap showTypeVar ts)
 
 solveConstraints :: Infer ()
 solveConstraints = do
@@ -643,3 +641,9 @@ cofree = Decl () "Cofree" [ TyVar "f", TyVar "a" ]
     ]
   ]
 
+recfail = Decl () "Rec" [ TyVar "f", TyVar "a" ]
+  [ Variant "Rec"
+    [ tVar "f"
+    , app (tVar "f") (tVar "a")
+    ]
+  ]
