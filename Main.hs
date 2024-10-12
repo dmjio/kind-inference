@@ -84,19 +84,28 @@ showKindVar (KindMetaVar (MetaVar v)) = "{" <> show v <> "}"
 showKindVar Type                      = "*"
 showKindVar x                         = parens (showKind x)
 
+cataType :: (Type a -> Type a) -> Type a -> Type a
+cataType f (TypeFun x l r) =
+  f $ TypeFun x (cataType f l) (cataType f r)
+cataType f (TypeApp x l r) =
+  f $ TypeApp x (cataType f l) (cataType f r)
+cataType f x = f x
+
 showType :: Type ann -> String
-showType (TypeFun _ l r)   = showTypeVar l <> " -> " <> showType r
-showType (TypeApp ann (TypeApp _ (TypeCon _ (TyCon "(->)")) f) x) =
-  showType (TypeFun ann f x)
-showType (TypeApp ann f x) = showType f <> " " <> showTypeVar x
-showType t                 = showTypeVar t
+showType t = showType_ (cataType funTy t)
+  where
+    funTy (TypeApp ann (TypeApp _ (TypeCon _ (TyCon "(->)")) f) x) =
+      TypeFun ann f x
+    funTy t = t
+
+showType_ :: Type ann -> String
+showType_ (TypeFun _ l r)   = showTypeVar l <> " -> " <> showType_ r
+showType_ (TypeApp ann f x) = showType_ f <> " " <> showTypeVar x
+showType_ t                 = showTypeVar t
 
 showTypeVar (TypeVar ann (TyVar v)) = v
 showTypeVar (TypeCon ann (TyCon c)) = c
-showTypeVar (TypeApp ann (TypeApp _ (TypeCon _ (TyCon "(->)")) f) x) =
-  showTypeVar (TypeFun ann f x)
-showTypeVar (TypeApp ann l r)       = showType l <> " " <> showType r
-showTypeVar x                       = parens (showType x)
+showTypeVar x                       = parens (showType_ x)
 
 parens :: String -> String
 parens x = "(" <> x <> ")"
@@ -463,7 +472,7 @@ elaborateType (TypeApp () l r) = do
   mv <- fresh
   constrain
     (ann fun)
-    (KindFun (KindMetaVar (ann arg)) (KindMetaVar mv))
+    (KindMetaVar (ann arg) --> KindMetaVar mv)
   pure (TypeApp mv fun arg)
 elaborateType (TypeFun () l r) = do
   fun <- elaborateType (funTy `app` l)
@@ -471,7 +480,7 @@ elaborateType (TypeFun () l r) = do
   mv <- fresh
   constrain
     (ann fun)
-    (KindFun (KindMetaVar (ann arg)) (KindMetaVar mv))
+    (KindMetaVar (ann arg) --> KindMetaVar mv)
   pure (TypeApp mv fun arg)
 
 funTy :: Type ()
