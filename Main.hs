@@ -200,7 +200,7 @@ solveConstraints :: Infer ()
 solveConstraints = do
   dbg "Solving..."
   fix $ \loop -> do
-    constraint <- getConstraint
+    constraint <- popConstraint
     case constraint of
       Nothing -> do
         dbg "Solving complete..."
@@ -213,23 +213,20 @@ solveConstraints = do
       updateConstraints k v
 
 updateConstraints :: MetaVar -> Kind -> Infer ()
-updateConstraints k v = do
-  cs <- replaceConstraints k v <$> gets constraints
+updateConstraints m1 k = do
+  cs <- fmap replaceConstraint <$> gets constraints
   modify $ \s -> s { constraints = cs }
     where
-      replaceConstraints :: MetaVar -> Kind -> [Constraint] -> [Constraint]
-      replaceConstraints m k = fmap (replaceConstraint m k)
-        where
-          replaceConstraint :: MetaVar -> Kind -> Constraint -> Constraint
-          replaceConstraint m k (Equality l r) =
-            Equality (cataKind replaceKind l) (cataKind replaceKind r)
-              where
-                replaceKind :: Kind -> Kind
-                replaceKind (KindMetaVar v) | v == m = k
-                replaceKind kk = kk
+      replaceConstraint :: Constraint -> Constraint
+      replaceConstraint (Equality l r) =
+        Equality (cataKind replaceKind l) (cataKind replaceKind r)
+          where
+            replaceKind :: Kind -> Kind
+            replaceKind (KindMetaVar m2) | m1 == m2 = k
+            replaceKind x = x
 
-getConstraint :: Infer (Maybe Constraint)
-getConstraint = do
+popConstraint :: Infer (Maybe Constraint)
+popConstraint = do
   ccs <- gets constraints
   case ccs of
     c : cs -> do
@@ -268,11 +265,11 @@ dumpSubs = do
   subs <- gets substitutions
   liftIO $ putStrLn (showSubs subs)
     where
-      showSub :: (MetaVar, Kind) -> String
-      showSub (k,v) = showMetaVar k <> " : " <> showKind v
-
       showSubs :: Subst -> String
       showSubs subst = intercalate "\n" (showSub <$> M.toList subst)
+
+      showSub :: (MetaVar, Kind) -> String
+      showSub (k,v) = showMetaVar k <> " : " <> showKind v
 
 dumpConstraints :: Infer ()
 dumpConstraints = do
