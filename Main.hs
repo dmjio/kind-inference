@@ -56,10 +56,9 @@ data Variant a
 data Type a
   = TypeVar a TyVar
   | TypeCon a TyCon
+  | TypeFun a (Type a) (Type a)
   | TypeApp a (Type a) (Type a)
   deriving (Show, Eq)
-
-(--->) = TypeApp ()
 
 newtype KindVar = MkKindVar { unKindVar :: String }
   deriving (Show, Eq, Ord)
@@ -83,15 +82,20 @@ showKindVar :: Kind -> String
 showKindVar (KindVar (MkKindVar v))   = v
 showKindVar (KindMetaVar (MetaVar v)) = "{" <> show v <> "}"
 showKindVar Type                      = "*"
-showKindVar x                         = "(" <> showKind x <> ")"
+showKindVar x                         = parens (showKind x)
 
 showType :: Type ann -> String
+showType (TypeFun _ l r)   = showTypeVar l <> " -> " <> showType r
 showType (TypeApp ann f x) = showType f <> " " <> showTypeVar x
 showType t                 = showTypeVar t
 
 showTypeVar (TypeVar ann (TyVar v)) = v
 showTypeVar (TypeCon ann (TyCon c)) = c
-showTypeVar x                       = "(" <> showType x <> ")"
+showTypeVar (TypeApp ann l r)       = showType l <> " " <> showType r
+showTypeVar x                       = parens (showType x)
+
+parens :: String -> String
+parens x = "(" <> x <> ")"
 
 showScheme :: Scheme -> String
 showScheme (Scheme [] k) = showKind k
@@ -217,11 +221,9 @@ updateConstraints m1 k = do
   cs <- fmap replaceConstraint <$> gets constraints
   modify $ \s -> s { constraints = cs }
     where
-      replaceConstraint :: Constraint -> Constraint
       replaceConstraint (Equality l r) =
         Equality (cataKind replaceKind l) (cataKind replaceKind r)
           where
-            replaceKind :: Kind -> Kind
             replaceKind (KindMetaVar m2) | m1 == m2 = k
             replaceKind x = x
 
@@ -299,7 +301,7 @@ metaVarBind m k = do
   pure (Just (m, k))
 
 updateSubstitution :: MetaVar -> Kind -> Infer ()
-updateSubstitution m k = modifySub (M.insert m k . M.map replaceInState)
+updateSubstitution m k = modifySub (M.map replaceInState . M.insert m k)
   where
     replaceInState = cataKind $ \kind ->
       case kind of
@@ -613,7 +615,7 @@ treefail = Decl () "Tree" [ TyVar "a" ]
 
 state :: Decl ()
 state = TypeSyn () "State" [ TyVar "s", TyVar "a" ]
-  (tCon "StateT" ---> tVar "s" ---> tCon "Identity" ---> tVar "a")
+  (tCon "StateT" `app` tVar "s" `app` tCon "Identity" `app` tVar "a")
 
 thisthat :: Decl ()
 thisthat = Decl () "ThisThat" [ TyVar "l", TyVar "r" ]
@@ -630,11 +632,19 @@ tVar n = TypeVar () (TyVar n)
 app :: Type () -> Type () -> Type ()
 app x y = TypeApp () x y
 
+(--->) = TypeFun ()
+infixr 9 --->
+
+fmap_ :: Type ()
+fmap_ = (tVar "a" ---> tVar "b")
+    ---> (tVar "f" `app` tVar "a")
+    ---> (tVar "f" `app` tVar "b")
+
 cofree :: Decl ()
 cofree = Decl () "Cofree" [ TyVar "f", TyVar "a" ]
   [ Variant "Cofree"
     [ tVar "a"
-    , tVar "f" ---> (tCon "Cofree" ---> tVar "f" ---> tVar "a")
+    , tVar "f" `app` (tCon "Cofree" `app` tVar "f" `app` tVar "a")
     ]
   ]
 
