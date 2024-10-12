@@ -16,7 +16,7 @@ import           Prelude              hiding (maybe)
 type Name = String
 
 newtype TyVar = TyVar { getTyVar :: Name }
-  deriving (Show, Eq)
+  deriving (Show, Eq, Ord)
 
 newtype TyCon = TyCon { unTyCon :: Name }
   deriving (Show, Eq)
@@ -30,6 +30,10 @@ showMetaVar mv = showKind (KindMetaVar mv)
 data Decl a
   = Decl a Name [TyVar] [Variant a]
   | TypeSyn a Name [TyVar] (Type a)
+  | Class a Name [TyVar] [Method a]
+  deriving (Show, Eq)
+
+data Method a = Method Name (Type a)
   deriving (Show, Eq)
 
 class GetName f where
@@ -38,6 +42,7 @@ class GetName f where
 instance GetName (Decl a) where
   getName (Decl _ name _ _)    = name
   getName (TypeSyn _ name _ _) = name
+  getName (Class _ name _ _) = name
 
 instance GetName (Type a) where
   getName (TypeVar _ name) = getName name
@@ -69,6 +74,7 @@ data Kind
   | KindFun Kind Kind
   | KindVar KindVar
   | KindMetaVar MetaVar
+  | Constraint
   deriving (Show, Eq, Ord)
 
 data Scheme = Scheme [KindVar] Kind
@@ -82,6 +88,7 @@ showKindVar :: Kind -> String
 showKindVar (KindVar (MkKindVar v))   = v
 showKindVar (KindMetaVar (MetaVar v)) = "{" <> show v <> "}"
 showKindVar Type                      = "*"
+showKindVar Constraint                = "Constraint"
 showKindVar x                         = parens (showKind x)
 
 cataType :: (Type a -> Type a) -> Type a -> Type a
@@ -194,16 +201,42 @@ showDecl (TypeSyn ann name vars typ) =
   , "="
   , showType typ
   ]
-showDecl (Decl ann n vars (x:xs)) =
+showDecl (Decl ann n vars xs) =
   intercalate " "
   [ "data"
   , if null (showAnn ann) then n else "( " <> n <> " :: " <> showAnn ann <> ")"
   , intercalate " " [ x | TyVar x <- vars ]
-  , "\n  = " <> showVariant x
-  , concat
-    [ "\n  | " <> v
-    | v <- fmap showVariant xs
-    ]
+  , case xs of
+      [] -> ""
+      x : xs ->
+        concat
+        [ "\n  = " <> showVariant x
+        , concat
+          [ "\n  | " <> v
+          | v <- fmap showVariant xs
+          ]
+        ]
+  ]
+showDecl (Class ann n vars methods) =
+  intercalate " "
+  [ "class"
+  , if null (showAnn ann) then n else "( " <> n <> " :: " <> showAnn ann <> ")"
+  , intercalate " " [ x | TyVar x <- vars ]
+  , "where"
+  , beforeAll "\n  " (showMethod <$> methods)
+  ]
+
+beforeAll :: [a] -> [[a]] -> [a]
+beforeAll s xs = s <> intercalate s xs
+
+functor :: Decl ()
+functor = (Class () "Functor" [ TyVar "f" ] [Method "fmap" fmap_])
+
+showMethod (Method name t) =
+  intercalate " "
+  [ name
+  , "::"
+  , showType t
   ]
 
 showVariant :: Variant ann -> String
@@ -335,6 +368,11 @@ getKind :: MetaVar -> Infer Kind
 getKind mv = M.findWithDefault (KindMetaVar mv) mv <$> gets substitutions
 
 substitute :: Decl MetaVar -> Infer (Decl Kind)
+substitute (Class mv name vars methods) = do
+  dbg "Substituting..."
+  substitutedKind <- getKind mv
+  typ' <- traverse substituteMethod methods
+  pure (Class substitutedKind name vars typ')
 substitute (TypeSyn mv name vars typ) = do
   dbg "Substituting..."
   substitutedKind <- getKind mv
@@ -349,6 +387,11 @@ substitute (Decl mv name vars variants) = do
       substituteVariant (Variant name types) = do
         substituted <- traverse substituteType types
         pure (Variant name substituted)
+
+substituteMethod :: Method MetaVar -> Infer (Method Kind)
+substituteMethod (Method mv typ) = do
+  t <- substituteType typ
+  pure (Method mv t)
 
 substituteType :: Type MetaVar -> Infer (Type Kind)
 substituteType (TypeCon mv tyCon) = do
@@ -452,6 +495,26 @@ elaborate (Decl () name vars variants) mv = do
   variants <- traverse elaborateVariant variants
   constrain mv (foldr KindFun Type metaVars)
   pure (Decl mv name vars variants)
+elaborate (Class () name vars methods) mv = do
+  void $ populateEnv (getFreeVars vars methods)
+  methods_ <- traverse elaborateMethod methods
+  mvs <- fmap KindMetaVar <$> traverse lookupTyVar vars
+  constrain mv (foldr KindFun Constraint mvs)
+  pure (Class mv name vars methods_)
+
+getFreeVars :: [TyVar] -> [Method a] -> [TyVar]
+getFreeVars vars methods = S.toList fvs
+  where
+    fvs =
+      S.unions
+      [ S.unions [ freeVars t | Method _ t <- methods ]
+      , S.fromList vars
+      ]
+
+elaborateMethod :: Method () -> Infer (Method MetaVar)
+elaborateMethod (Method name typ) = do
+  t <- elaborateType typ
+  pure (Method name t)
 
 elaborateVariant :: Variant () -> Infer (Variant MetaVar)
 elaborateVariant (Variant name types) = do
@@ -522,14 +585,16 @@ instantiate (Scheme vars kind) = do
       replaceKind _ k = k
 
 cataKind :: (Kind -> Kind) -> Kind -> Kind
-cataKind f Type =
-  f Type
 cataKind f (KindFun k1 k2) =
   f $ KindFun (cataKind f k1) (cataKind f k2)
 cataKind f (KindVar v) =
   f (KindVar v)
 cataKind f (KindMetaVar v) =
   f (KindMetaVar v)
+cataKind f Type =
+  f Type
+cataKind f Constraint =
+  f Constraint
 
 class Ann a where
   ann :: a ann -> ann
@@ -543,6 +608,7 @@ instance Ann Type where
 instance Ann Decl where
   ann (Decl x _ _ _)    = x
   ann (TypeSyn x _ _ _) = x
+  ann (Class x _ _ _) = x
 
 constrain :: MetaVar -> Kind -> Infer ()
 constrain m k = constrainKinds (KindMetaVar m) k
@@ -558,6 +624,12 @@ metaVars :: Kind -> Set MetaVar
 metaVars (KindFun k1 k2) = metaVars k1 `S.union` metaVars k2
 metaVars (KindMetaVar t) = S.singleton t
 metaVars _ = mempty
+
+freeVars :: Type a -> Set TyVar
+freeVars (TypeVar _ tyVar) = S.singleton tyVar
+freeVars (TypeFun _ x y) = freeVars x `S.union` freeVars y
+freeVars (TypeApp _ x y) = freeVars x `S.union` freeVars y
+freeVars _ = mempty
 
 generalizeDecl :: Decl Kind -> Scheme
 generalizeDecl (Decl k _ _ _)    = generalize k
