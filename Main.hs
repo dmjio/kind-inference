@@ -136,7 +136,6 @@ data Error
   | UnboundName TyCon
   | UnificationFailed Kind Kind
   | OccursCheckFailed MetaVar Kind
-  | SubstitutionFailure MetaVar
 
 fresh :: Infer MetaVar
 fresh = do
@@ -154,8 +153,6 @@ instance Show Error where
     "Unbound Name: " <> show con
   show (UnboundVar tyvar) =
     "Unbound Var: " <> show tyvar
-  show (SubstitutionFailure mv) =
-    "Substitution fail: " <> showKind (KindMetaVar mv)
   show (OccursCheckFailed mv k) =
     intercalate "\n"
     [ "Occurs check failed"
