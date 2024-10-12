@@ -86,11 +86,15 @@ showKindVar x                         = parens (showKind x)
 
 showType :: Type ann -> String
 showType (TypeFun _ l r)   = showTypeVar l <> " -> " <> showType r
+showType (TypeApp ann (TypeApp _ (TypeCon _ (TyCon "(->)")) f) x) =
+  showType (TypeFun ann f x)
 showType (TypeApp ann f x) = showType f <> " " <> showTypeVar x
 showType t                 = showTypeVar t
 
 showTypeVar (TypeVar ann (TyVar v)) = v
 showTypeVar (TypeCon ann (TyCon c)) = c
+showTypeVar (TypeApp ann (TypeApp _ (TypeCon _ (TyCon "(->)")) f) x) =
+  showTypeVar (TypeFun ann f x)
 showTypeVar (TypeApp ann l r)       = showType l <> " " <> showType r
 showTypeVar x                       = parens (showType x)
 
@@ -346,6 +350,11 @@ substituteType (TypeApp mv f x) = do
   g <- substituteType f
   y <- substituteType x
   pure (TypeApp kind g y)
+substituteType (TypeFun mv f x) = do
+  kind <- getKind mv
+  g <- substituteType f
+  y <- substituteType x
+  pure (TypeFun kind g y)
 substituteType (TypeVar mv t) = do
   kind <- getKind mv
   pure (TypeVar kind t)
@@ -457,13 +466,16 @@ elaborateType (TypeApp () l r) = do
     (KindFun (KindMetaVar (ann arg)) (KindMetaVar mv))
   pure (TypeApp mv fun arg)
 elaborateType (TypeFun () l r) = do
-  fun <- elaborateType l
+  fun <- elaborateType (funTy `app` l)
   arg <- elaborateType r
   mv <- fresh
   constrain
     (ann fun)
     (KindFun (KindMetaVar (ann arg)) (KindMetaVar mv))
-  pure (TypeFun mv fun arg)
+  pure (TypeApp mv fun arg)
+
+funTy :: Type ()
+funTy = tCon "(->)"
 
 lookupTyCon :: TyCon -> Infer MetaVar
 lookupTyCon con@(TyCon name) = do
@@ -517,6 +529,7 @@ instance Ann Type where
   ann (TypeVar x _)   = x
   ann (TypeCon x _)   = x
   ann (TypeApp x _ _) = x
+  ann (TypeFun x _ _) = x
 
 instance Ann Decl where
   ann (Decl x _ _ _)    = x
@@ -647,6 +660,11 @@ fmap_ :: Type ()
 fmap_ = (tVar "a" ---> tVar "b")
     ---> (tVar "f" `app` tVar "a")
     ---> (tVar "f" `app` tVar "b")
+
+fmapSyn = TypeSyn () "Fmap" [TyVar "f", TyVar "a", TyVar "b" ] fmap_
+
+-- type Fmap f a b = (a -> b) -> f a -> f b
+-- Fmap :: (* -> *) -> * -> * -> *
 
 cofree :: Decl ()
 cofree = Decl () "Cofree" [ TyVar "f", TyVar "a" ]
