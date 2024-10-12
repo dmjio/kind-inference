@@ -15,10 +15,10 @@ import           Prelude              hiding (maybe)
 
 type Name = String
 
-newtype TyVar = TyVar { getTyVar :: String }
+newtype TyVar = TyVar { getTyVar :: Name }
   deriving (Show, Eq)
 
-newtype TyCon = TyCon { unTyCon :: String }
+newtype TyCon = TyCon { unTyCon :: Name }
   deriving (Show, Eq)
 
 newtype MetaVar = MetaVar { unMetaVar :: Int }
@@ -60,7 +60,7 @@ data Type a
   | TypeApp a (Type a) (Type a)
   deriving (Show, Eq)
 
-newtype KindVar = MkKindVar { unKindVar :: String }
+newtype KindVar = MkKindVar { unKindVar :: Name }
   deriving (Show, Eq, Ord)
 
 -- | A representation of a kind.
@@ -197,21 +197,24 @@ showVariant :: Variant ann -> String
 showVariant (Variant n []) = n
 showVariant (Variant n ts) = intercalate " " (n : fmap showTypeVar ts)
 
+solve :: Infer ()
+solve = do
+  dbg "Solving..."
+  solveConstraints
+
 solveConstraints :: Infer ()
 solveConstraints = do
-  dbg "Solving..."
-  fix $ \loop -> do
-    constraint <- popConstraint
-    case constraint of
-      Nothing -> do
-        dbg "Solving complete..."
-      Just (Equality k1 k2) -> do
-        mapM_ apply =<< unify k1 k2
-        loop
-  where
-    apply (k,v) = do
-      updateSubstitution k v
-      updateConstraints k v
+  constraint <- popConstraint
+  case constraint of
+    Nothing -> do
+      dbg "Solving complete..."
+    Just (Equality k1 k2) -> do
+      mapM_ (uncurry apply) =<< unify k1 k2
+      solveConstraints
+    where
+      apply k v = do
+        updateSubstitution k v
+        updateConstraints k v
 
 updateConstraints :: MetaVar -> Kind -> Infer ()
 updateConstraints m1 k = do
@@ -398,7 +401,7 @@ infer :: Decl () -> Infer (Scheme, (Decl Kind))
 infer decl = do
   dbg "Inferring..."
   elaborated <- elaborateDecl decl
-  solveConstraints
+  solve
   d <- substitute elaborated
   dump "Succeeded..."
   pure (generalizeDecl d, d)
@@ -453,6 +456,14 @@ elaborateType (TypeApp () l r) = do
     (ann fun)
     (KindFun (KindMetaVar (ann arg)) (KindMetaVar mv))
   pure (TypeApp mv fun arg)
+elaborateType (TypeFun () l r) = do
+  fun <- elaborateType l
+  arg <- elaborateType r
+  mv <- fresh
+  constrain
+    (ann fun)
+    (KindFun (KindMetaVar (ann arg)) (KindMetaVar mv))
+  pure (TypeFun mv fun arg)
 
 lookupTyCon :: TyCon -> Infer MetaVar
 lookupTyCon con@(TyCon name) = do
