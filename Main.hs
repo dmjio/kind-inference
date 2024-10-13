@@ -31,7 +31,7 @@ data Decl a
   | TypeSyn a Name [TyVar] (Type a)
   | Class a Name [TyVar] [Method a]
   | Newtype a Name [TyVar] (Variant a)
-  | KindSignature Name Kind
+  | KindSignature a Name Kind
   deriving (Show, Eq)
 
 data Method a = Method Name (Type a)
@@ -48,7 +48,7 @@ instance GetName (Decl a) where
   getName (TypeSyn _ name _ _)   = name
   getName (Class _ name _ _)     = name
   getName (Newtype _ name _ _)   = name
-  getName (KindSignature name _) = name
+  getName (KindSignature _ name _) = name
 
 instance GetName (Type a) where
   getName (TypeVar _ name) = getName name
@@ -240,7 +240,7 @@ showDecl (Newtype ann n vars variant) =
   , "="
   , showVariant variant
   ]
-showDecl (KindSignature name kind) =
+showDecl (KindSignature _ name kind) =
   intercalate " "
   [ "type"
   , name
@@ -410,6 +410,9 @@ substitute (Newtype mv name vars variant) = do
   substitutedKind <- getKind mv
   substitutedVariant <- substituteVariant variant
   pure (Newtype substitutedKind name vars substitutedVariant)
+substitute (KindSignature mv name kind) = do
+  k <- getKind mv
+  pure (KindSignature k name kind)
 
 substituteVariant (Variant name types) = do
   substituted <- traverse substituteType types
@@ -469,12 +472,12 @@ inferDecls decls = runInfer $ do
   addKindSignatures decls
   forM decls $ \d -> do
     (scheme, decl) <- infer d
-    addToKindEnv scheme decl
+    addToKindEnv decl scheme
     decl <$ reset
 
 addKindSignatures :: [Decl a] -> Infer ()
 addKindSignatures decls = do
-  let sigs = [ (generalize k, name) | KindSignature name k <- decls ]
+  let sigs = [ (name, generalize k) | KindSignature _ name k <- decls ]
   mapM_ (uncurry addToKindEnv) sigs
 
 reset :: Infer ()
@@ -485,10 +488,10 @@ reset =
       , var = 0
       }
 
-addToKindEnv :: GetName a => Scheme -> a -> Infer ()
-addToKindEnv scheme d =
+addToKindEnv :: GetName a => a -> Scheme -> Infer ()
+addToKindEnv k v =
   modify $ \s -> s {
-    kindEnv = M.insert (getName d) scheme (kindEnv s)
+    kindEnv = M.insert (getName k) v (kindEnv s)
   }
 
 infer :: Decl () -> Infer (Scheme, (Decl Kind))
@@ -517,28 +520,43 @@ elaborateDecl decl = do
   dbg "Elaborating..."
   elaborate decl =<< addToEnv (getName decl)
 
+handleKindSignature
+  :: Name
+  -> MetaVar
+  -> Infer ()
+handleKindSignature name mv = do
+  result <- lookupKindEnv name
+  forM_ result (constrain mv . KindMetaVar)
+
 elaborate :: Decl () -> MetaVar -> Infer (Decl MetaVar)
 elaborate (TypeSyn () name vars typ) mv = do
+  handleKindSignature name mv
   metaVars <- fmap KindMetaVar <$> populateEnv vars
   t <- elaborateType typ
   constrain mv (foldr KindFun (KindMetaVar (ann t)) metaVars)
   pure (TypeSyn mv name vars t)
 elaborate (Decl () name vars variants) mv = do
+  handleKindSignature name mv
   metaVars <- fmap KindMetaVar <$> populateEnv vars
   variants <- traverse elaborateVariant variants
   constrain mv (foldr KindFun Type metaVars)
   pure (Decl mv name vars variants)
 elaborate (Newtype () name vars variant) mv = do
+  handleKindSignature name mv
   metaVars <- fmap KindMetaVar <$> populateEnv vars
   variant_ <- elaborateVariant variant
   constrain mv (foldr KindFun Type metaVars)
   pure (Newtype mv name vars variant_)
 elaborate (Class () name vars methods) mv = do
+  handleKindSignature name mv
   void $ populateEnv (getFreeVars vars methods)
   methods_ <- traverse elaborateMethod methods
   mvs <- fmap KindMetaVar <$> traverse lookupTyVar vars
   constrain mv (foldr KindFun Constraint mvs)
   pure (Class mv name vars methods_)
+elaborate (KindSignature () name kind) mv = do
+  constrain mv kind
+  pure (KindSignature mv name kind)
 
 getFreeVars :: [TyVar] -> [Method a] -> [TyVar]
 getFreeVars vars methods = S.toList fvs
@@ -586,6 +604,18 @@ elaborateType (TypeFun () l r) = do
 
 funTy :: Type ()
 funTy = tCon "(->)"
+
+lookupKindEnv :: Name -> Infer (Maybe MetaVar)
+lookupKindEnv name = do
+  kindEnv <- gets kindEnv
+  case M.lookup name kindEnv of
+    Just scheme -> do
+      mv <- fresh
+      kind <- instantiate scheme
+      dbg $ "Instantiating: " <> name <> " :: " <> showKind kind
+      constrain mv kind
+      pure (Just mv)
+    _ -> pure Nothing
 
 lookupTyCon :: TyCon -> Infer MetaVar
 lookupTyCon con@(TyCon name) = do
@@ -648,6 +678,7 @@ instance Ann Decl where
   ann (TypeSyn x _ _ _) = x
   ann (Class x _ _ _)   = x
   ann (Newtype x _ _ _) = x
+  ann (KindSignature x _ _) = x
 
 constrain :: MetaVar -> Kind -> Infer ()
 constrain m k = constrainKinds (KindMetaVar m) k
@@ -675,7 +706,7 @@ generalizeDecl (Decl k _ _ _)    = generalize k
 generalizeDecl (TypeSyn k _ _ _) = generalize k
 generalizeDecl (Class k _ _ _)   = generalize k
 generalizeDecl (Newtype k _ _ _) = generalize k
-generalizeDecl (KindSignature _ k) = generalize k
+generalizeDecl (KindSignature _ _ k) = generalize k
 
 generalize :: Kind -> Scheme
 generalize kind = Scheme vars (cataKind quantify kind)
@@ -804,3 +835,17 @@ recfail = Decl () "Rec" [ TyVar "f", TyVar "a" ]
     , app (tVar "f") (tVar "a")
     ]
   ]
+
+-- tests that inference fails if a kind signature doesn't match
+okFailTest
+  = testInfer
+  [ KindSignature () "OK" (Type --> Type)
+  , TypeSyn () "OK" [] (tCon "Int")
+  ]
+
+okTest
+  = testInfer
+  [ KindSignature () "OK" Type
+  , TypeSyn () "OK" [] (tCon "Int")
+  ]
+
