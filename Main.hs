@@ -31,6 +31,7 @@ data Decl a
   = Decl a Name [TyVar] [Variant a]
   | TypeSyn a Name [TyVar] (Type a)
   | Class a Name [TyVar] [Method a]
+  | Newtype a Name [TyVar] (Variant a)
   deriving (Show, Eq)
 
 data Method a = Method Name (Type a)
@@ -43,6 +44,7 @@ instance GetName (Decl a) where
   getName (Decl _ name _ _)    = name
   getName (TypeSyn _ name _ _) = name
   getName (Class _ name _ _) = name
+  getName (Newtype _ name _ _) = name
 
 instance GetName (Type a) where
   getName (TypeVar _ name) = getName name
@@ -226,6 +228,15 @@ showDecl (Class ann n vars methods) =
   , beforeAll "\n  " (showMethod <$> methods)
   ]
 
+showDecl (Newtype ann n vars variant) =
+  intercalate " "
+  [ "newtype"
+  , if null (showAnn ann) then n else "( " <> n <> " :: " <> showAnn ann <> ")"
+  , intercalate " " [ x | TyVar x <- vars ]
+  , "="
+  , showVariant variant
+  ]
+
 beforeAll :: [a] -> [[a]] -> [a]
 beforeAll s xs = s <> intercalate s xs
 
@@ -383,10 +394,15 @@ substitute (Decl mv name vars variants) = do
   substitutedKind <- getKind mv
   substitutedVariants <- mapM substituteVariant variants
   pure (Decl substitutedKind name vars substitutedVariants)
-    where
-      substituteVariant (Variant name types) = do
-        substituted <- traverse substituteType types
-        pure (Variant name substituted)
+substitute (Newtype mv name vars variant) = do
+  dbg "Substituting..."
+  substitutedKind <- getKind mv
+  substitutedVariant <- substituteVariant variant
+  pure (Newtype substitutedKind name vars substitutedVariant)
+
+substituteVariant (Variant name types) = do
+  substituted <- traverse substituteType types
+  pure (Variant name substituted)
 
 substituteMethod :: Method MetaVar -> Infer (Method Kind)
 substituteMethod (Method mv typ) = do
@@ -495,6 +511,11 @@ elaborate (Decl () name vars variants) mv = do
   variants <- traverse elaborateVariant variants
   constrain mv (foldr KindFun Type metaVars)
   pure (Decl mv name vars variants)
+elaborate (Newtype () name vars variant) mv = do
+  metaVars <- fmap KindMetaVar <$> populateEnv vars
+  variant_ <- elaborateVariant variant
+  constrain mv (foldr KindFun Type metaVars)
+  pure (Newtype mv name vars variant_)
 elaborate (Class () name vars methods) mv = do
   void $ populateEnv (getFreeVars vars methods)
   methods_ <- traverse elaborateMethod methods
@@ -608,7 +629,8 @@ instance Ann Type where
 instance Ann Decl where
   ann (Decl x _ _ _)    = x
   ann (TypeSyn x _ _ _) = x
-  ann (Class x _ _ _) = x
+  ann (Class x _ _ _)   = x
+  ann (Newtype x _ _ _) = x
 
 constrain :: MetaVar -> Kind -> Infer ()
 constrain m k = constrainKinds (KindMetaVar m) k
@@ -634,7 +656,8 @@ freeVars _ = mempty
 generalizeDecl :: Decl Kind -> Scheme
 generalizeDecl (Decl k _ _ _)    = generalize k
 generalizeDecl (TypeSyn k _ _ _) = generalize k
-generalizeDecl (Class k _ _ _) = generalize k
+generalizeDecl (Class k _ _ _)   = generalize k
+generalizeDecl (Newtype k _ _ _) = generalize k
 
 generalize :: Kind -> Scheme
 generalize kind = Scheme vars (cataKind quantify kind)
@@ -703,7 +726,7 @@ statet :: Decl ()
 statet = TypeSyn () "Foo" [] (tCon "StateT")
 
 proxy :: Decl ()
-proxy = Decl () "Proxy" [ TyVar "k" ] [Variant "Proxy" []]
+proxy = Newtype () "Proxy" [ TyVar "k" ] (Variant "Proxy" [])
 
 tree :: Decl ()
 tree = Decl () "Tree" [ TyVar "a" ]
