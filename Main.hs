@@ -1,4 +1,3 @@
-{-# LANGUAGE KindSignatures #-}
 module Main where
 
 import           Control.Monad
@@ -32,6 +31,7 @@ data Decl a
   | TypeSyn a Name [TyVar] (Type a)
   | Class a Name [TyVar] [Method a]
   | Newtype a Name [TyVar] (Variant a)
+  | KindSignature Name Kind
   deriving (Show, Eq)
 
 data Method a = Method Name (Type a)
@@ -41,10 +41,11 @@ class GetName f where
   getName :: f -> Name
 
 instance GetName (Decl a) where
-  getName (Decl _ name _ _)    = name
-  getName (TypeSyn _ name _ _) = name
-  getName (Class _ name _ _) = name
-  getName (Newtype _ name _ _) = name
+  getName (Decl _ name _ _)      = name
+  getName (TypeSyn _ name _ _)   = name
+  getName (Class _ name _ _)     = name
+  getName (Newtype _ name _ _)   = name
+  getName (KindSignature name _) = name
 
 instance GetName (Type a) where
   getName (TypeVar _ name) = getName name
@@ -236,6 +237,15 @@ showDecl (Newtype ann n vars variant) =
   , "="
   , showVariant variant
   ]
+showDecl (KindSignature name kind) =
+  intercalate " "
+  [ "type"
+  , name
+  , "::"
+  , showKind kind
+  ]
+
+kk = showDecl (KindSignature "LOL" (Type --> Type) :: Decl ())
 
 beforeAll :: [a] -> [[a]] -> [a]
 beforeAll s xs = s <> intercalate s xs
