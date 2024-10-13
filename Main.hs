@@ -33,6 +33,7 @@ data Decl a
   | Instance a [Pred a] (Pred a)
   | Newtype a Name [TyVar] (Variant a)
   | KindSignature a Name Kind
+  | Foreign a Name (Type a)
   deriving (Show, Eq)
 
 data Pred a = Pred a Name (Type a)
@@ -54,6 +55,7 @@ instance GetName (Decl a) where
   getName (Newtype _ name _ _)     = name
   getName (KindSignature _ name _) = name
   getName (Instance _ _ pred)      = getName pred
+  getName (Foreign _ name _)       = name
 
 instance GetName (Pred a) where
   getName (Pred _ name _) = name
@@ -260,6 +262,17 @@ showDecl (KindSignature _ name kind) =
   , "::"
   , showKind kind
   ]
+showDecl (Foreign _ name typ) =
+  intercalate " "
+  [ "foreign"
+  , "import"
+  , "unsafe"
+  , "ccall"
+  , name
+  , "::"
+  , showType typ
+  ]
+
 
 beforeAll :: [a] -> [[a]] -> [a]
 beforeAll s [] = []
@@ -441,6 +454,10 @@ substituteDecl (Instance mv supers context) = do
   supers_ <- traverse substitutePred supers
   ctx_ <- substitutePred context
   pure (Instance k supers_ ctx_)
+substituteDecl (Foreign mv name typ) = do
+  k <- getKind mv
+  t <- substituteType typ
+  pure (Foreign k name t)
 
 substitutePred (Pred mv n typ) = do
   k <- getKind mv
@@ -483,6 +500,7 @@ defaultKindEnv = M.fromList
   , ("String", Scheme [] Type)
   , ("Either", Scheme [] (Type --> Type --> Type))
   , ("Maybe", Scheme [] (Type --> Type))
+  , ("IO", Scheme [] (Type --> Type))
   , ("(->)", Scheme [] (Type --> Type --> Type))
   , ("StateT", Scheme [] (Type --> (Type --> Type) --> Type --> Type))
   , ("Identity", Scheme [] (Type --> Type))
@@ -598,6 +616,11 @@ elaborate (Instance () supers ctx) mv = do
   constrain (ann ctx_) Constraint
   constrain (ann ctx_) (KindMetaVar mv)
   pure (Instance mv supers_ ctx_)
+elaborate (Foreign () name typ) mv = do
+  t <- elaborateType typ
+  constrain (ann t) Type
+  constrain (ann t) (KindMetaVar mv)
+  pure (Foreign mv name t)
 
 elaboratePred :: Pred () -> Infer (Pred MetaVar)
 elaboratePred (Pred () name typ) = do
@@ -722,6 +745,7 @@ instance Ann Decl where
   ann (Newtype x _ _ _) = x
   ann (KindSignature x _ _) = x
   ann (Instance x _ _) = x
+  ann (Foreign x _ _) = x
 
 instance Ann Pred where
   ann (Pred x _ _)    = x
@@ -754,6 +778,7 @@ generalizeDecl (Class k _ _ _)   = generalize k
 generalizeDecl (Newtype k _ _ _) = generalize k
 generalizeDecl (KindSignature _ _ k) = generalize k
 generalizeDecl (Instance k _ _) = generalize k
+generalizeDecl (Foreign k _ _) = generalize k
 
 generalize :: Kind -> Scheme
 generalize kind = Scheme vars (cataKind quantify kind)
@@ -910,3 +935,4 @@ instTestFail
 
 functor :: Decl ()
 functor = (Class () "Functor" [ TyVar "f" ] [Method "fmap" fmap_])
+
