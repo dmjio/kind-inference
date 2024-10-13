@@ -614,8 +614,7 @@ lookupKindEnv name = do
   case M.lookup name kindEnv of
     Just scheme -> do
       mv <- fresh
-      kind <- instantiate scheme
-      dbg $ "Instantiating: " <> name <> " :: " <> showKind kind
+      kind <- instantiate name scheme
       constrain mv kind
       pure (Just mv)
     _ -> pure Nothing
@@ -626,8 +625,7 @@ lookupTyCon con@(TyCon name) = do
   case M.lookup name kindEnv of
     Just scheme -> do
       mv <- fresh
-      kind <- instantiate scheme
-      dbg $ "Instantiating: " <> name <> " :: " <> showKind kind
+      kind <- instantiate name scheme
       constrain mv kind
       pure mv
     Nothing -> do
@@ -643,8 +641,9 @@ lookupTyVar var@(TyVar name) = do
     Nothing -> throwError (UnboundVar var)
     Just v  -> pure v
 
-instantiate :: Scheme -> Infer Kind
-instantiate (Scheme vars kind) = do
+instantiate :: Name -> Scheme -> Infer Kind
+instantiate name (Scheme vars kind) = do
+  dbg $ "Instantiating: " <> name <> " :: " <> showKind kind
   mvs <- replicateM (length vars) fresh
   let mapping = M.fromList (zip vars mvs)
   pure (cataKind (replaceKind mapping) kind)
