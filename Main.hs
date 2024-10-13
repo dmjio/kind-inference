@@ -634,6 +634,7 @@ freeVars _ = mempty
 generalizeDecl :: Decl Kind -> Scheme
 generalizeDecl (Decl k _ _ _)    = generalize k
 generalizeDecl (TypeSyn k _ _ _) = generalize k
+generalizeDecl (Class k _ _ _) = generalize k
 
 generalize :: Kind -> Scheme
 generalize kind = Scheme vars (cataKind quantify kind)
@@ -676,6 +677,7 @@ main = testInfer
   , thisthat
   , proxy
   , cofree
+  , functor
   ]
 
 int :: Decl ()
