@@ -40,6 +40,9 @@ data Method a = Method Name (Type a)
 class GetName f where
   getName :: f -> Name
 
+instance GetName Name where
+  getName = id
+
 instance GetName (Decl a) where
   getName (Decl _ name _ _)      = name
   getName (TypeSyn _ name _ _)   = name
@@ -244,8 +247,6 @@ showDecl (KindSignature name kind) =
   , "::"
   , showKind kind
   ]
-
-kk = showDecl (KindSignature "LOL" (Type --> Type) :: Decl ())
 
 beforeAll :: [a] -> [[a]] -> [a]
 beforeAll s xs = s <> intercalate s xs
@@ -465,10 +466,16 @@ shouldDebug = True
 
 inferDecls :: [Decl ()] -> IO (Either Error [Decl Kind])
 inferDecls decls = runInfer $ do
+  addKindSignatures decls
   forM decls $ \d -> do
     (scheme, decl) <- infer d
     addToKindEnv scheme decl
     decl <$ reset
+
+addKindSignatures :: [Decl a] -> Infer ()
+addKindSignatures decls = do
+  let sigs = [ (generalize k, name) | KindSignature name k <- decls ]
+  mapM_ (uncurry addToKindEnv) sigs
 
 reset :: Infer ()
 reset =
@@ -478,7 +485,7 @@ reset =
       , var = 0
       }
 
-addToKindEnv :: Scheme -> Decl a -> Infer ()
+addToKindEnv :: GetName a => Scheme -> a -> Infer ()
 addToKindEnv scheme d =
   modify $ \s -> s {
     kindEnv = M.insert (getName d) scheme (kindEnv s)
@@ -668,6 +675,7 @@ generalizeDecl (Decl k _ _ _)    = generalize k
 generalizeDecl (TypeSyn k _ _ _) = generalize k
 generalizeDecl (Class k _ _ _)   = generalize k
 generalizeDecl (Newtype k _ _ _) = generalize k
+generalizeDecl (KindSignature _ k) = generalize k
 
 generalize :: Kind -> Scheme
 generalize kind = Scheme vars (cataKind quantify kind)
