@@ -164,8 +164,7 @@ type Subst = Map MetaVar Kind
 type Infer = ExceptT Error (StateT InferState IO)
 
 data Error
-  = UnboundVar TyVar
-  | UnboundName TyCon
+  = UnboundName Name
   | UnificationFailed Kind Kind
   | OccursCheckFailed MetaVar Kind
 
@@ -181,10 +180,8 @@ instance Show Error where
     , "Kind: " <> showKind k1
     , "Kind: " <> showKind k2
     ]
-  show (UnboundName con) =
-    "Unbound Name: " <> show con
-  show (UnboundVar tyvar) =
-    "Unbound Var: " <> show tyvar
+  show (UnboundName tyvar) =
+    "Unbound Name: " <> show tyvar
   show (OccursCheckFailed mv k) =
     intercalate "\n"
     [ "Occurs check failed"
@@ -588,7 +585,7 @@ elaborate (Class () name vars methods) mv = do
   handleKindSignature name mv
   void $ populateEnv (getFreeVars vars methods)
   methods_ <- traverse elaborateMethod methods
-  mvs <- fmap KindMetaVar <$> traverse lookupTyVar vars
+  mvs <- fmap KindMetaVar <$> traverse lookupName vars
   constrain mv (foldr KindFun Constraint mvs)
   pure (Class mv name vars methods_)
 elaborate (KindSignature () name kind) mv = do
@@ -605,7 +602,7 @@ elaborate (Instance () supers ctx) mv = do
 elaboratePred :: Pred () -> Infer (Pred MetaVar)
 elaboratePred (Pred () name typ) = do
   mv <- fresh
-  class_ <- lookupTyCon (TyCon name)
+  class_ <- lookupName name
   type_ <- elaborateType typ
   constrain class_  (KindMetaVar (ann type_) --> Constraint)
   pure (Pred mv name type_)
@@ -632,10 +629,10 @@ elaborateVariant (Variant name types) = do
 
 elaborateType :: Type () -> Infer (Type MetaVar)
 elaborateType (TypeVar () tyVar) = do
-  mv <- lookupTyVar tyVar
+  mv <- lookupName tyVar
   pure (TypeVar mv tyVar)
 elaborateType (TypeCon () tyCon) = do
-  mv <- lookupTyCon tyCon
+  mv <- lookupName tyCon
   pure (TypeCon mv tyCon)
 elaborateType (TypeApp () l r) = do
   fun <- elaborateType l
@@ -668,8 +665,9 @@ lookupKindEnv name = do
       pure (Just mv)
     _ -> pure Nothing
 
-lookupTyCon :: TyCon -> Infer MetaVar
-lookupTyCon con@(TyCon name) = do
+lookupName :: GetName name => name -> Infer MetaVar
+lookupName named = do
+  let name = getName named
   kindEnv <- gets kindEnv
   case M.lookup name kindEnv of
     Just scheme -> do
@@ -680,15 +678,8 @@ lookupTyCon con@(TyCon name) = do
     Nothing -> do
       env <- gets env
       case M.lookup name env of
-        Nothing -> throwError (UnboundName con)
+        Nothing -> throwError (UnboundName name)
         Just v -> pure v
-
-lookupTyVar :: TyVar -> Infer MetaVar
-lookupTyVar var@(TyVar name) = do
-  env <- gets env
-  case M.lookup name env of
-    Nothing -> throwError (UnboundVar var)
-    Just v  -> pure v
 
 instantiate :: Name -> Scheme -> Infer Kind
 instantiate name (Scheme vars kind) = do
