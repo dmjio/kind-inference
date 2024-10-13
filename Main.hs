@@ -265,6 +265,7 @@ showDecl (KindSignature _ name kind) =
   ]
 
 beforeAll :: [a] -> [[a]] -> [a]
+beforeAll s [] = []
 beforeAll s xs = s <> intercalate s xs
 
 showListInst = Instance () [Pred () "Show" (tCon "List" `app` tVar "a")]
