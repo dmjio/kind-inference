@@ -358,7 +358,7 @@ dump msg = do
     dumpSubs
     dumpConstraints
     dumpEnv
-    dumpKindEnv
+    -- dumpKindEnv
 
 dumpSubs :: Infer ()
 dumpSubs = do
@@ -395,7 +395,7 @@ dumpKindEnv = do
 metaVarBind :: MetaVar -> Kind -> Infer (Maybe (MetaVar, Kind))
 metaVarBind mv (KindMetaVar m) | mv == m = pure Nothing
 metaVarBind m k = do
-  dbg ("metaVarBind " ++ showMetaVar m ++ " (" ++ showKind k ++ ")")
+  dbg ("Binding... " ++ showMetaVar m ++ " : " ++ showKind k)
   occursCheck m k
   pure (Just (m, k))
 
@@ -497,10 +497,12 @@ emptyState = InferState mempty defaultKindEnv mempty 0 []
 defaultKindEnv :: Map String Scheme
 defaultKindEnv = M.fromList
   [ ("Int", Scheme [] Type)
+  , ("Double", Scheme [] Type)
   , ("String", Scheme [] Type)
   , ("Either", Scheme [] (Type --> Type --> Type))
   , ("Maybe", Scheme [] (Type --> Type))
   , ("IO", Scheme [] (Type --> Type))
+  , ("()", Scheme [] Type)
   , ("(->)", Scheme [] (Type --> Type --> Type))
   , ("StateT", Scheme [] (Type --> (Type --> Type) --> Type --> Type))
   , ("Identity", Scheme [] (Type --> Type))
@@ -808,7 +810,6 @@ testInfer decs = do
           scheme = generalize (ann decl)
           name = getName decl
         dbg $ showDecl decl
-        dbg $ name <> " :: " <> showScheme scheme
 
 main :: IO ()
 main = testInfer
@@ -935,4 +936,10 @@ instTestFail
 
 functor :: Decl ()
 functor = (Class () "Functor" [ TyVar "f" ] [Method "fmap" fmap_])
+
+foreignTest
+  = testInfer
+  [ Foreign () "sin" (tCon "IO" `app` tCon "()")
+  ]
+
 
