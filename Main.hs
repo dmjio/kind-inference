@@ -98,10 +98,8 @@ showKindVar Constraint                = "Constraint"
 showKindVar x                         = parens (showKind x)
 
 cataType :: (Type a -> Type a) -> Type a -> Type a
-cataType f (TypeFun x l r) =
-  f $ TypeFun x (cataType f l) (cataType f r)
-cataType f (TypeApp x l r) =
-  f $ TypeApp x (cataType f l) (cataType f r)
+cataType f (TypeFun x l r) = f $ TypeFun x (cataType f l) (cataType f r)
+cataType f (TypeApp x l r) = f $ TypeApp x (cataType f l) (cataType f r)
 cataType f x = f x
 
 showType :: Type ann -> String
@@ -387,30 +385,35 @@ modifySub f = do
   modify $ \s -> s { substitutions = f subs }
 
 getKind :: MetaVar -> Infer Kind
-getKind mv = M.findWithDefault (KindMetaVar mv) mv <$> gets substitutions
+getKind mv =
+  M.findWithDefault (KindMetaVar mv) mv <$>
+    gets substitutions
 
-substitute :: Decl MetaVar -> Infer (Decl Kind)
-substitute (Class mv name vars methods) = do
+substitute
+  :: Decl MetaVar
+  -> Infer (Decl Kind)
+substitute decl = do
   dbg "Substituting..."
+  substituteDecl decl
+
+substituteDecl :: Decl MetaVar -> Infer (Decl Kind)
+substituteDecl (Class mv name vars methods) = do
   substitutedKind <- getKind mv
   typ' <- traverse substituteMethod methods
   pure (Class substitutedKind name vars typ')
-substitute (TypeSyn mv name vars typ) = do
-  dbg "Substituting..."
+substituteDecl (TypeSyn mv name vars typ) = do
   substitutedKind <- getKind mv
   typ' <- substituteType typ
   pure (TypeSyn substitutedKind name vars typ')
-substitute (Decl mv name vars variants) = do
-  dbg "Substituting..."
+substituteDecl (Decl mv name vars variants) = do
   substitutedKind <- getKind mv
   substitutedVariants <- mapM substituteVariant variants
   pure (Decl substitutedKind name vars substitutedVariants)
-substitute (Newtype mv name vars variant) = do
-  dbg "Substituting..."
+substituteDecl (Newtype mv name vars variant) = do
   substitutedKind <- getKind mv
   substitutedVariant <- substituteVariant variant
   pure (Newtype substitutedKind name vars substitutedVariant)
-substitute (KindSignature mv name kind) = do
+substituteDecl (KindSignature mv name kind) = do
   k <- getKind mv
   pure (KindSignature k name kind)
 
