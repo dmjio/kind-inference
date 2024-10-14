@@ -219,7 +219,9 @@ showDecl (TypeSyn ann name vars typ) =
 showDecl (Decl ann n vars xs) =
   intercalate " "
   [ "data"
-  , if null (showAnn ann) then n else "( " <> n <> " :: " <> showAnn ann <> ")"
+  , if null (showAnn ann)
+    then n
+    else parens (n <> " :: " <> showAnn ann)
   , intercalate " " [ x | TyVar x <- vars ]
   , case xs of
       [] -> ""
@@ -640,6 +642,7 @@ elaborate (KindSignature () name kind) mv = do
   constrain mv kind
   pure (KindSignature mv name kind)
 elaborate (Instance () supers ctx) mv = do
+  addContextToEnv supers
   supers_ <- traverse elaboratePred supers
   forM supers_ $ \m -> constrain (ann m) Constraint
   ctx_ <- elaboratePred ctx
@@ -647,6 +650,7 @@ elaborate (Instance () supers ctx) mv = do
   constrain (ann ctx_) (KindMetaVar mv)
   pure (Instance mv supers_ ctx_)
 elaborate (TypeSignature () name ctx typ) mv = do
+  addContextToEnv ctx
   ctx_ <- traverse elaboratePred ctx
   forM ctx_ $ \m -> constrain (ann m) Constraint
   t <- elaborateType typ
@@ -659,11 +663,15 @@ elaborate (Foreign () name typ) mv = do
   constrain (ann t) (KindMetaVar mv)
   pure (Foreign mv name t)
 
+addContextToEnv :: [Pred ()] -> Infer ()
+addContextToEnv ctx = do
+  let fvs = S.unions [ freeVars typ | Pred () _ typ <- ctx ]
+  void (populateEnv (S.toList fvs))
+
 elaboratePred :: Pred () -> Infer (Pred MetaVar)
 elaboratePred (Pred () name typ) = do
   mv <- fresh
   class_ <- lookupName name
-  void $ populateEnv $ S.toList (freeVars typ)
   type_ <- elaborateType typ
   constrain class_  (KindMetaVar (ann type_) --> Constraint)
   pure (Pred mv name type_)
