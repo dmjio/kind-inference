@@ -27,7 +27,7 @@ showMetaVar :: MetaVar -> String
 showMetaVar mv = showKind (KindMetaVar mv)
 
 data Decl a
-  = Decl a Name [TyVar] [Variant a]
+  = Data a Name [TyVar] [Variant a]
   | TypeSyn a Name [TyVar] (Type a)
   | Class a Name [TyVar] [Method a]
   | Instance a [Pred a] (Pred a)
@@ -50,7 +50,7 @@ instance GetName Name where
   getName = id
 
 instance GetName (Decl a) where
-  getName (Decl _ name _ _)        = name
+  getName (Data _ name _ _)        = name
   getName (TypeSyn _ name _ _)     = name
   getName (Class _ name _ _)       = name
   getName (Newtype _ name _ _)     = name
@@ -216,7 +216,7 @@ showDecl (TypeSyn ann name vars typ) =
   , "="
   , showType typ
   ]
-showDecl (Decl ann n vars xs) =
+showDecl (Data ann n vars xs) =
   intercalate " "
   [ "data"
   , if null (showAnn ann)
@@ -461,10 +461,10 @@ substituteDecl (TypeSyn mv name vars typ) = do
   substitutedKind <- getKind mv
   typ' <- substituteType typ
   pure (TypeSyn substitutedKind name vars typ')
-substituteDecl (Decl mv name vars variants) = do
+substituteDecl (Data mv name vars variants) = do
   substitutedKind <- getKind mv
   substitutedVariants <- mapM substituteVariant variants
-  pure (Decl substitutedKind name vars substitutedVariants)
+  pure (Data substitutedKind name vars substitutedVariants)
 substituteDecl (Newtype mv name vars variant) = do
   substitutedKind <- getKind mv
   substitutedVariant <- substituteVariant variant
@@ -619,12 +619,12 @@ elaborate (TypeSyn () name vars typ) mv = do
   t <- elaborateType typ
   constrain mv (foldr KindFun (KindMetaVar (ann t)) metaVars)
   pure (TypeSyn mv name vars t)
-elaborate (Decl () name vars variants) mv = do
+elaborate (Data () name vars variants) mv = do
   handleKindSignature name mv
   metaVars <- fmap KindMetaVar <$> populateEnv vars
   variants <- traverse elaborateVariant variants
   constrain mv (foldr KindFun Type metaVars)
-  pure (Decl mv name vars variants)
+  pure (Data mv name vars variants)
 elaborate (Newtype () name vars variant) mv = do
   handleKindSignature name mv
   metaVars <- fmap KindMetaVar <$> populateEnv vars
@@ -785,7 +785,7 @@ instance Ann Type where
   ann (TypeFun x _ _) = x
 
 instance Ann Decl where
-  ann (Decl x _ _ _)    = x
+  ann (Data x _ _ _)    = x
   ann (TypeSyn x _ _ _) = x
   ann (Class x _ _ _)   = x
   ann (Newtype x _ _ _) = x
@@ -819,7 +819,7 @@ freeVars (TypeApp _ x y) = freeVars x `S.union` freeVars y
 freeVars _ = mempty
 
 generalizeDecl :: Decl Kind -> Scheme
-generalizeDecl (Decl k _ _ _)    = generalize k
+generalizeDecl (Data k _ _ _)    = generalize k
 generalizeDecl (TypeSyn k _ _ _) = generalize k
 generalizeDecl (Class k _ _ _)   = generalize k
 generalizeDecl (Newtype k _ _ _) = generalize k
@@ -872,21 +872,21 @@ main = testInfer
   ]
 
 int :: Decl ()
-int = Decl () "Int" [] [ Variant "Int" [] ]
+int = Data () "Int" [] [ Variant "Int" [] ]
 
 lol :: Decl ()
-lol = Decl () "LOL" [ TyVar "a", TyVar "b" ]
+lol = Data () "LOL" [ TyVar "a", TyVar "b" ]
   [ Variant "LOL" [ app (app (tCon "Either") (tVar "a")) (tVar "b") ]
   ]
 
 maybe :: Decl ()
-maybe = Decl () "Maybe" [ TyVar "a" ]
+maybe = Data () "Maybe" [ TyVar "a" ]
   [ Variant "Just" [ tVar "a" ]
   , Variant "Nothing" []
   ]
 
 person :: Decl ()
-person = Decl () "Person" []
+person = Data () "Person" []
   [ Variant "Person" [ tCon "String", tCon "Int" ]
   ]
 
@@ -897,14 +897,14 @@ proxy :: Decl ()
 proxy = Newtype () "Proxy" [ TyVar "k" ] (Variant "Proxy" [])
 
 tree :: Decl ()
-tree = Decl () "Tree" [ TyVar "a" ]
+tree = Data () "Tree" [ TyVar "a" ]
   [ Variant "Node" [ tVar "a", app (tCon "Tree") (tVar "a")
                    , app (tCon "Tree") (tVar "a")
                    ]
   ]
 
 treefail :: Decl ()
-treefail = Decl () "Tree" [ TyVar "a" ]
+treefail = Data () "Tree" [ TyVar "a" ]
   [ Variant "Node" [ tVar "a", tCon "Tree", tCon "Tree" ]
   ]
 
@@ -913,7 +913,7 @@ state = TypeSyn () "State" [ TyVar "s", TyVar "a" ]
   (tCon "StateT" `app` tVar "s" `app` tCon "Identity" `app` tVar "a")
 
 thisthat :: Decl ()
-thisthat = Decl () "ThisThat" [ TyVar "l", TyVar "r" ]
+thisthat = Data () "ThisThat" [ TyVar "l", TyVar "r" ]
   [ Variant "This" [ tVar "l" ]
   , Variant "That" [ tVar "r" ]
   ]
@@ -941,14 +941,14 @@ fmapSyn = TypeSyn () "Fmap" [TyVar "f", TyVar "a", TyVar "b" ] fmap_
 -- Fmap :: (* -> *) -> * -> * -> *
 
 cofree :: Decl ()
-cofree = Decl () "Cofree" [ TyVar "f", TyVar "a" ]
+cofree = Data () "Cofree" [ TyVar "f", TyVar "a" ]
   [ Variant "Cofree"
     [ tVar "a"
     , tVar "f" `app` (tCon "Cofree" `app` tVar "f" `app` tVar "a")
     ]
   ]
 
-recfail = Decl () "Rec" [ TyVar "f", TyVar "a" ]
+recfail = Data () "Rec" [ TyVar "f", TyVar "a" ]
   [ Variant "Rec"
     [ tVar "f"
     , app (tVar "f") (tVar "a")
