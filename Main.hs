@@ -14,11 +14,11 @@ import           Prelude              hiding (maybe)
 
 type Name = String
 
-newtype TyVar = TyVar { getTyVar :: Name }
+newtype TyVar = TyVar Name
   deriving (Show, Eq, Ord)
 
-newtype TyCon = TyCon { unTyCon :: Name }
-  deriving (Show, Eq)
+newtype TyCon = TyCon Name
+  deriving (Show, Eq, Ord)
 
 newtype MetaVar = MetaVar { unMetaVar :: Int }
   deriving (Show, Eq, Num, Ord)
@@ -34,6 +34,7 @@ data Decl a
   | Newtype a Name [TyVar] (Variant a)
   | KindSignature a Name Kind
   | Foreign a Name (Type a)
+  | TypeSignature a Name [Pred a] (Type a)
   deriving (Show, Eq)
 
 data Pred a = Pred a Name (Type a)
@@ -56,6 +57,7 @@ instance GetName (Decl a) where
   getName (KindSignature _ name _) = name
   getName (Instance _ _ pred)      = getName pred
   getName (Foreign _ name _)       = name
+  getName (TypeSignature _ name _ _) = name
 
 instance GetName (Pred a) where
   getName (Pred _ name _) = name
@@ -79,7 +81,7 @@ data Type a
   | TypeCon a TyCon
   | TypeFun a (Type a) (Type a)
   | TypeApp a (Type a) (Type a)
-  deriving (Show, Eq)
+  deriving (Show, Eq, Ord)
 
 newtype KindVar = MkKindVar { unKindVar :: Name }
   deriving (Show, Eq, Ord)
@@ -141,7 +143,9 @@ showScheme (Scheme vars k) =
     , showKind k
     ]
 
-data Constraint = Equality Kind Kind
+data Constraint
+  = Equality Kind Kind
+  | TypeEquality (Type Kind) (Type Kind)
   deriving (Eq, Ord)
 
 instance Show Constraint where
@@ -250,7 +254,9 @@ showDecl (Instance ann preds pred) =
 showDecl (Newtype ann n vars variant) =
   intercalate " "
   [ "newtype"
-  , if null (showAnn ann) then n else "( " <> n <> " :: " <> showAnn ann <> ")"
+  , if null (showAnn ann)
+    then n
+    else parens (n <> " :: " <> showAnn ann)
   , intercalate " " [ x | TyVar x <- vars ]
   , "="
   , showVariant variant
@@ -262,7 +268,19 @@ showDecl (KindSignature _ name kind) =
   , "::"
   , showKind kind
   ]
-showDecl (Foreign _ name typ) =
+showDecl (TypeSignature ann name preds t) =
+  intercalate " " $
+  [ name
+  , "::"
+  , case preds of
+      [] -> showType t
+      [x] -> showPred x <> " => " <> showType t
+      xs -> parens (intercalate ", " (showPred <$> xs)) <> " => " <> showType t
+  ] ++
+  [ ":: " <> showAnn ann
+  | not $ null (showAnn ann)
+  ]
+showDecl (Foreign ann name typ) =
   intercalate " "
   [ "foreign"
   , "import"
@@ -270,7 +288,9 @@ showDecl (Foreign _ name typ) =
   , "ccall"
   , name
   , "::"
-  , showType typ
+  ,  if null (showAnn ann)
+     then showType typ
+     else parens (showType typ <> " :: " <> showAnn ann)
   ]
 
 
@@ -374,9 +394,10 @@ dumpSubs = do
 
 dumpConstraints :: Infer ()
 dumpConstraints = do
-  liftIO (putStrLn "\nDumping Constraints...")
   cs <- gets constraints
-  liftIO $ forM_ cs print
+  unless (null cs) $ do
+    liftIO (putStrLn "\nDumping Constraints...")
+    liftIO $ forM_ cs print
 
 dumpEnv :: Infer ()
 dumpEnv = do
@@ -454,6 +475,11 @@ substituteDecl (Instance mv supers context) = do
   supers_ <- traverse substitutePred supers
   ctx_ <- substitutePred context
   pure (Instance k supers_ ctx_)
+substituteDecl (TypeSignature mv name ctx typ) = do
+  k <- getKind mv
+  ctx_ <- traverse substitutePred ctx
+  t <- substituteType typ
+  pure (TypeSignature k name ctx_ t)
 substituteDecl (Foreign mv name typ) = do
   k <- getKind mv
   t <- substituteType typ
@@ -499,8 +525,11 @@ defaultKindEnv = M.fromList
   [ ("Int", Scheme [] Type)
   , ("Double", Scheme [] Type)
   , ("String", Scheme [] Type)
+  , ("Bool", Scheme [] Type)
   , ("Either", Scheme [] (Type --> Type --> Type))
   , ("Maybe", Scheme [] (Type --> Type))
+  , ("Monad", Scheme [] ((Type --> Type) --> Constraint))
+  , ("Eq", Scheme [] (Type --> Constraint))
   , ("IO", Scheme [] (Type --> Type))
   , ("()", Scheme [] Type)
   , ("(->)", Scheme [] (Type --> Type --> Type))
@@ -554,7 +583,6 @@ infer decl = do
   elaborated <- elaborateDecl decl
   solve
   d <- substitute elaborated
-  dump "Succeeded..."
   pure (generalizeDecl d, d)
 
 populateEnv :: GetName name => [name] -> Infer [MetaVar]
@@ -618,6 +646,13 @@ elaborate (Instance () supers ctx) mv = do
   constrain (ann ctx_) Constraint
   constrain (ann ctx_) (KindMetaVar mv)
   pure (Instance mv supers_ ctx_)
+elaborate (TypeSignature () name ctx typ) mv = do
+  ctx_ <- traverse elaboratePred ctx
+  forM ctx_ $ \m -> constrain (ann m) Constraint
+  t <- elaborateType typ
+  constrain (ann t) Type
+  constrain mv (KindMetaVar (ann t))
+  pure (TypeSignature mv name ctx_ t)
 elaborate (Foreign () name typ) mv = do
   t <- elaborateType typ
   constrain (ann t) Type
@@ -628,6 +663,7 @@ elaboratePred :: Pred () -> Infer (Pred MetaVar)
 elaboratePred (Pred () name typ) = do
   mv <- fresh
   class_ <- lookupName name
+  void $ populateEnv $ S.toList (freeVars typ)
   type_ <- elaborateType typ
   constrain class_  (KindMetaVar (ann type_) --> Constraint)
   pure (Pred mv name type_)
@@ -746,6 +782,7 @@ instance Ann Decl where
   ann (Class x _ _ _)   = x
   ann (Newtype x _ _ _) = x
   ann (KindSignature x _ _) = x
+  ann (TypeSignature x _ _ _) = x
   ann (Instance x _ _) = x
   ann (Foreign x _ _) = x
 
@@ -779,6 +816,7 @@ generalizeDecl (TypeSyn k _ _ _) = generalize k
 generalizeDecl (Class k _ _ _)   = generalize k
 generalizeDecl (Newtype k _ _ _) = generalize k
 generalizeDecl (KindSignature _ _ k) = generalize k
+generalizeDecl (TypeSignature k _ _ _) = generalize k
 generalizeDecl (Instance k _ _) = generalize k
 generalizeDecl (Foreign k _ _) = generalize k
 
@@ -942,4 +980,14 @@ foreignTest
   [ Foreign () "sin" (tCon "IO" `app` tCon "()")
   ]
 
+-- f :: (Monad m, Eq (m a)) => a -> m a -> Bool
+typeSigTest = testInfer [ typeSig ]
 
+typeSig =
+  TypeSignature
+    ()
+    "f"
+    [ Pred () "Monad" (tVar "m")
+    , Pred () "Eq" (tVar "m" `app` tVar "a")
+    ]
+    (tVar "a" ---> (tVar "m" `app` tVar "a") ---> tCon "Bool")
