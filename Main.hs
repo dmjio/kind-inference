@@ -41,6 +41,22 @@ data Binding typ
   = Binding typ Name [Exp typ] (Exp typ)
   deriving (Show, Eq)
 
+class Fun a where
+  infixr 9 -->
+  (-->) :: a -> a -> a
+
+instance Fun Kind where
+  (-->) :: Kind -> Kind -> Kind
+  (-->) = KindFun
+
+instance Fun (Type ()) where
+  (-->) :: Type () -> Type () -> Type ()
+  (-->) = TypeFun ()
+
+instance Fun (Type Kind) where
+  (-->) :: Type Kind -> Type Kind -> Type Kind
+  (-->) = TypeFun Type
+
 data Exp a
   = Var a Name
   | Lit a Lit
@@ -751,7 +767,7 @@ emptyState = InferState mempty defaultKindEnv defaultTypeEnv mempty mempty 0 []
 
 defaultTypeEnv :: Map String TypeScheme
 defaultTypeEnv = M.fromList
-  [ ("(+)", TypeScheme [] (tConT "Int" ==> tConT "Int" ==> tConT "Int"))
+  [ ("(+)", TypeScheme [] (tConT "Int" --> tConT "Int" --> tConT "Int"))
   ]
 
 defaultKindEnv :: Map String Scheme
@@ -770,10 +786,6 @@ defaultKindEnv = M.fromList
   , ("StateT", Scheme [] (Type --> (Type --> Type) --> Type --> Type))
   , ("Identity", Scheme [] (Type --> Type))
   ]
-
-infixr 9 -->
-(-->) :: Kind -> Kind -> Kind
-(-->) = KindFun
 
 runInfer :: Infer a -> IO (Either Error a)
 runInfer m = evalStateT (runExceptT m) emptyState
@@ -944,7 +956,7 @@ elaborateExp (App () f x) = do
   arg <- elaborateExp x
   mv <- fresh
   constrainType (ann fun)
-    (TypeMetaVar (ann arg) ==> TypeMetaVar mv)
+    (TypeMetaVar (ann arg) --> TypeMetaVar mv)
   pure (App mv fun arg)
 
 elaborateDecl :: Decl () () -> Infer (Decl MetaVar ())
@@ -1372,18 +1384,10 @@ tVar n = TypeVar () (TyVar n)
 app :: Type () -> Type () -> Type ()
 app x y = TypeApp () x y
 
-(--->) :: Type () -> Type () -> Type ()
-(--->) = TypeFun ()
-infixr 9 --->
-
-(==>) :: Type Kind -> Type Kind -> Type Kind
-(==>) = TypeFun Type
-infixr 9 ==>
-
 fmap_ :: Type ()
-fmap_ = (tVar "a" ---> tVar "b")
-    ---> (tVar "f" `app` tVar "a")
-    ---> (tVar "f" `app` tVar "b")
+fmap_ = (tVar "a" --> tVar "b")
+    --> (tVar "f" `app` tVar "a")
+    --> (tVar "f" `app` tVar "b")
 
 fmapSyn :: Decl () typ
 fmapSyn = TypeSyn () "Fmap" [TyVar "f", TyVar "a", TyVar "b" ] fmap_
@@ -1457,4 +1461,4 @@ typeSig =
     [ Pred () "Monad" (tVar "m")
     , Pred () "Eq" (tVar "m" `app` tVar "a")
     ]
-    (tVar "a" ---> (tVar "m" `app` tVar "a") ---> tCon "Bool")
+    (tVar "a" --> (tVar "m" `app` tVar "a") --> tCon "Bool")
