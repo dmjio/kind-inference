@@ -139,7 +139,7 @@ data Kind
   | Constraint
   deriving (Show, Eq, Ord)
 
-data Scheme = Scheme [KindVar] Kind
+data Scheme = Scheme [Name] Kind
   deriving (Show, Eq)
 
 showKind :: Kind -> String
@@ -184,7 +184,7 @@ showScheme (Scheme [] k) = showKind k
 showScheme (Scheme vars k) =
   intercalate " "
     [ "forall"
-    , intercalate " " [ v | MkKindVar v <- vars ]
+    , intercalate " " vars
     , "."
     , showKind k
     ]
@@ -194,11 +194,10 @@ showTypeScheme (TypeScheme [] k) = showType k
 showTypeScheme (TypeScheme vars k) =
   intercalate " "
     [ "forall"
-    , intercalate " " [ v | TyVar v <- vars ]
+    , intercalate " " vars
     , "."
     , showType k
     ]
-
 
 data Constraint
   = Equality Kind Kind
@@ -220,13 +219,13 @@ showConstraint (TypeEquality t1 t2) =
 
 data InferState
   = InferState
-  { env           :: Map Name MetaVar
-  , kindEnv       :: Map Name Scheme
-  , typeEnv       :: Map Name TypeScheme
-  , substitutions :: Map MetaVar Kind
+  { env               :: Map Name MetaVar
+  , kindEnv           :: Map Name Scheme
+  , typeEnv           :: Map Name TypeScheme
+  , substitutions     :: Map MetaVar Kind
   , typeSubstitutions :: Map MetaVar (Type Kind)
-  , var           :: Int
-  , constraints   :: [Constraint]
+  , var               :: Int
+  , constraints       :: [Constraint]
   } deriving (Show, Eq)
 
 type Subst = Map MetaVar Kind
@@ -995,7 +994,7 @@ inferType decl = do
   d <- substituteTyped elaborated
   pure (generalizeDeclType d, d)
 
-data TypeScheme = TypeScheme [TyVar] (Type Kind)
+data TypeScheme = TypeScheme [Name] (Type Kind)
   deriving (Show, Eq)
 
 addToEnv :: Name -> Infer MetaVar
@@ -1231,13 +1230,9 @@ lookupKindEnv name = do
 lookupName :: GetName name => name -> Infer MetaVar
 lookupName named = do
   let name = getName named
-  kindEnv <- gets kindEnv
-  case M.lookup name kindEnv of
-    Just scheme -> do
-      mv <- fresh
-      kind <- instantiate name scheme
-      constrain mv kind
-      pure mv
+  result <- lookupKindEnv name
+  case result of
+    Just mv -> pure mv
     Nothing -> do
       env <- gets env
       case M.lookup name env of
@@ -1267,9 +1262,10 @@ instantiate name (Scheme vars kind) = do
   let mapping = M.fromList (zip vars mvs)
   pure (cataKind (replaceKind mapping) kind)
     where
-      replaceKind mapping (KindVar v) =
+      replaceKind :: Map Name MetaVar -> Kind -> Kind
+      replaceKind mapping (KindVar (MkKindVar v)) =
          case M.lookup v mapping of
-           Nothing -> KindVar v
+           Nothing -> KindVar (MkKindVar v)
            Just mv -> KindMetaVar mv
       replaceKind _ k = k
 
@@ -1280,9 +1276,9 @@ instantiateType name (TypeScheme vars typ) = do
   let mapping = M.fromList (zip vars mvs)
   pure (cataType (replaceType mapping) typ)
     where
-      replaceType mapping (TypeVar kind v) =
+      replaceType mapping (TypeVar kind (TyVar v)) =
          case M.lookup v mapping of
-           Nothing -> TypeVar kind v
+           Nothing -> TypeVar kind (TyVar v)
            Just mv -> TypeMetaVar mv
       replaceType _ k = k
 
@@ -1364,7 +1360,7 @@ generalizeType typ = TypeScheme vars (cataType quantify typ)
     metavars = S.toList (metaVars typ)
     mapping  = zip (sort metavars) [0..]
     subs     = M.fromList mapping
-    vars     = sort [ TyVar (showT v) | v <- snd <$> mapping ]
+    vars     = sort [ showT v | v <- snd <$> mapping ]
 
     quantify (TypeMetaVar m) = TypeVar Type (TyVar (showT (subs M.! m)))
     quantify k               = k
@@ -1395,7 +1391,7 @@ generalize kind = Scheme vars (cataKind quantify kind)
     metavars = S.toList (metaVars kind)
     mapping = zip (sort metavars) [ 0 :: Int .. ]
     subs = M.fromList mapping
-    vars = sort [ MkKindVar (showKind_ v)| v <- snd <$> mapping ]
+    vars = sort [ showKind_ v | v <- snd <$> mapping ]
 
     quantify (KindMetaVar m) = KindVar (MkKindVar (showKind_ (subs M.! m)))
     quantify k               = k
