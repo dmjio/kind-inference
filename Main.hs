@@ -61,6 +61,7 @@ data Exp a
   = Var a Name
   | Lit a Lit
   | App a (Exp a) (Exp a)
+  | Lam a [Exp a] (Exp a)
   deriving (Show, Eq)
 
 data Lit
@@ -376,22 +377,22 @@ showDecl (Foreign a name typ) =
 showDecl (Declaration _ binding) = showBinding binding
 
 showBinding :: ShowAnn a => Binding a -> String
-showBinding (Binding annType name args body) =
-  intercalate " "
-  [ name
-  , intercalate " " (showExp <$> args) <> " = " <> showExp body <>
-      if null (showAnn annType)
-        then ""
-        else " :: " <> showAnn annType
-  ]
+showBinding (Binding _ name args body) =
+  name <> " " <> intercalate " " (showExp <$> args) <> " = " <> showExp body
 
 showExp :: Exp a -> String
-showExp (App _ f x) = showExpVar f <> " -> " <> showExp x
+showExp (App _ f x) = showExpVar f <> " " <> showExp x
 showExp x = showExpVar x
 
 showExpVar :: Exp a -> String
 showExpVar (Var _ name) = name
 showExpVar (Lit _ lit) = showLit lit
+showExpVar (Lam _ args body) =
+  parens $ '\\' : intercalate " "
+    [ intercalate " " (showExpVar <$> args)
+    , "->"
+    , showExpVar body
+    ]
 showExpVar x = parens (showExp x)
 
 
@@ -627,20 +628,25 @@ class Substitution k where
   metaVars :: k -> Set MetaVar
   freeVars :: k -> Set Name
 
+instance Substitution a => Substitution [a] where
+  freeVars = S.unions . fmap freeVars
+  metaVars = S.unions . fmap metaVars
+
 instance Substitution (Exp a) where
   metaVars _ = mempty
 
-  freeVars (Var _ x) = S.singleton x
-  freeVars (App _ f x) = freeVars f `S.union` freeVars x
-  freeVars (Lit _ _) = mempty
+  freeVars (Var _ x)         = S.singleton x
+  freeVars (App _ f x)       = freeVars f `S.union` freeVars x
+  freeVars (Lam _ args body) = freeVars body `S.difference` freeVars args
+  freeVars (Lit _ _)         = mempty
 
 instance Substitution Kind where
   metaVars (KindMetaVar mv) = S.singleton mv
-  metaVars (KindFun k1 k2) = metaVars k1 `S.union` metaVars k2
+  metaVars (KindFun k1 k2)  = metaVars k1 `S.union` metaVars k2
   metaVars _ = mempty
 
   freeVars (KindVar (MkKindVar k)) = S.singleton k
-  freeVars (KindFun k1 k2) = freeVars k1 `S.union` freeVars k2
+  freeVars (KindFun k1 k2)         = freeVars k1 `S.union` freeVars k2
   freeVars _ = mempty
 
 instance Substitution (Type a) where
@@ -695,11 +701,26 @@ substituteTyped decl = do
 substituteDeclTyped
   :: Decl Kind MetaVar
   -> Infer (Decl Kind (Type Kind))
-substituteDeclTyped (Declaration kind binding) = do
+substituteDeclTyped (Data k n args vars) =
+  pure (Data k n args vars)
+substituteDeclTyped (TypeSyn kind n args body) =
+  pure (TypeSyn kind n args body)
+substituteDeclTyped (Class kind name args body) =
+  pure (Class kind name args body)
+substituteDeclTyped (Instance kind supers ctx) =
+  pure (Instance kind supers ctx)
+substituteDeclTyped (Newtype kind name args var) =
+  pure (Newtype kind name args var)
+substituteDeclTyped (KindSignature kind name sig) =
+  pure (KindSignature kind name sig)
+substituteDeclTyped (Foreign kind name typ) =
+  pure (Foreign kind name typ)
+substituteDeclTyped (TypeSignature kind name args body) =
+  pure (TypeSignature kind name args body)
+substituteDeclTyped (Declaration k binding) = do
   b <- substituteBinding binding
-  pure (Declaration kind b)
--- TODO: draw rest of the owl here
--- substituteDeclTyped x = pure x
+  pure (Declaration k b)
+
 
 substituteBinding :: Binding MetaVar -> Infer (Binding (Type Kind))
 substituteBinding (Binding mv name args body) = do
@@ -720,6 +741,11 @@ substituteExp (App mv f x) = do
   fun <- substituteExp f
   arg <- substituteExp x
   pure (App typ fun arg)
+substituteExp (Lam mv args body) = do
+  typ <- getType mv
+  args' <- traverse substituteExp args
+  body' <- substituteExp body
+  pure (Lam typ args' body')
 
 substitute
   :: Decl MetaVar ()
@@ -846,23 +872,30 @@ tt = testInferType [ dec constFunc
                    , dec constChar
                    , dec idStr
                    , dec someDouble
+                   , dec lamConst
+                   , dec dollar
+                   , dec lamInt
                    ]
   where
-    idFunc = b "id" [ v "x" ] (v "x")
-    constFunc = b "const" [ v "a", v "b" ] (v "a")
-    addOne = b "addOne" [ v "x" ] (v "(+)" `appE` v "x" `appE` lint 1)
-    constChar = b "constChar" [ ] (v "const" `appE` char 'a')
-    idStr = b "idStr" [ ] (v "id" `appE` str "lol")
+    idFunc     = b "id" [ v "x" ] (v "x")
+    constFunc  = b "const" [ v "a", v "b" ] (v "a")
+    addOne     = b "addOne" [ v "x" ] (v "(+)" `appE` v "x" `appE` lint 1)
+    constChar  = b "constChar" [ ] (v "const" `appE` char 'a')
+    idStr      = b "idStr" [ ] (v "id" `appE` str "lol")
     someDouble = b "double" [ ] (double 3.14)
+    lamConst   = b "lamConst" [ ] (lam [ v "x" ] (lam [ v "y" ] (v "x")))
+    dollar     = b "($)" [ v "f", v "x" ] (v "f" `appE` v "x")
+    lamInt     = b "lamInt" [] (lam [ v "x" ] (v "x") `appE` lint 100)
 
-    appE = App ()
-    b = Binding ()
-    dec = Declaration Type
-    v = Var ()
-    lint = Lit () . LitInt
-    char = Lit () . LitChar
-    str = Lit () . LitString
+    appE   = App ()
+    b      = Binding ()
+    dec    = Declaration Type
+    v      = Var ()
+    lint   = Lit () . LitInt
+    char   = Lit () . LitChar
+    str    = Lit () . LitString
     double = Lit () . LitDouble
+    lam    = Lam ()
 
 testInferType :: [Decl Kind ()] -> IO ()
 testInferType decls = do
@@ -880,6 +913,8 @@ testInferType decls = do
               scheme = generalizeType (ann binding)
               name = getName decl
             dbg $ name <> " :: " <> showTypeScheme scheme
+            dbg $ showBinding binding
+            putStrLn ""
           _ -> pure ()
 
 inferTypes
@@ -980,7 +1015,22 @@ elaborateDeclTyped :: Decl Kind () -> Infer (Decl Kind MetaVar)
 elaborateDeclTyped (Declaration kind binding) = do
   b <- elaborateBinding binding
   pure (Declaration kind b)
--- TODO: Finish elaborating here
+elaborateDeclTyped (Data k n args vars) =
+  pure (Data k n args vars)
+elaborateDeclTyped (TypeSyn kind n args body) =
+  pure (TypeSyn kind n args body)
+elaborateDeclTyped (Class kind name args body) =
+  pure (Class kind name args body)
+elaborateDeclTyped (Instance kind supers ctx) =
+  pure (Instance kind supers ctx)
+elaborateDeclTyped (Newtype kind name args var) =
+  pure (Newtype kind name args var)
+elaborateDeclTyped (KindSignature kind name sig) =
+  pure (KindSignature kind name sig)
+elaborateDeclTyped (Foreign kind name typ) =
+  pure (Foreign kind name typ)
+elaborateDeclTyped (TypeSignature kind name args body) =
+  pure (TypeSignature kind name args body)
 
 elaborateBinding :: Binding () -> Infer (Binding MetaVar)
 elaborateBinding (Binding () name args body) = do
@@ -1009,6 +1059,16 @@ elaborateExp (App () f x) = do
   constrainType (ann fun)
     (TypeMetaVar (ann arg) --> TypeMetaVar mv)
   pure (App mv fun arg)
+elaborateExp (Lam () args body) = do
+  void $ populateEnv $ S.toList (freeVars args)
+  args' <- traverse elaborateExp args
+  body' <- elaborateExp body
+  mv <- fresh
+  constrainType mv $
+    foldr (-->)
+      (TypeMetaVar (ann body'))
+      (fmap (TypeMetaVar . ann) args')
+  pure (Lam mv args' body')
 
 elaborateLit :: Lit -> Infer MetaVar
 elaborateLit LitInt{} = do
@@ -1245,6 +1305,7 @@ instance Ann Exp where
   ann (Var x _) = x
   ann (Lit x _) = x
   ann (App x _ _) = x
+  ann (Lam x _ _) = x
 
 instance Ann Type where
   ann (TypeVar x _)   = x
@@ -1289,7 +1350,6 @@ constrainKinds k1 k2 = do
   modify $ \e ->
     e { constraints = Equality k1 k2 : constraints e
       }
-
 
 generalizeDeclType :: Decl Kind (Type Kind) -> Maybe TypeScheme
 generalizeDeclType (Declaration _ (Binding t _ _ _)) = Just (generalizeType t)
