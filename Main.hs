@@ -479,29 +479,34 @@ popConstraint = do
     [] ->
       pure Nothing
 
+kindCheck :: Kind -> Kind -> Infer ()
+kindCheck k1 k2 =
+  when (k1 /= k2) $
+    throwError (UnificationFailed k1 k2)
+
 unifyType
   :: Type Kind
   -> Type Kind
   -> Infer (Maybe (MetaVar, Type Kind))
 unifyType (TypeVar k1 x) (TypeVar k2 y)
   | x == y = do
-      when (k1 /= k2) $ throwError (UnificationFailed k1 k2)
+      kindCheck k1 k2
       pure Nothing
 unifyType (TypeCon k1 x) (TypeCon k2 y)
   | x == y = do
-      when (k1 /= k2) $ throwError (UnificationFailed k1 k2)
+      kindCheck k1 k2
       pure Nothing
 unifyType (TypeMetaVar x) (TypeMetaVar y) | x == y = pure Nothing
 unifyType (TypeFun k1 x1 y1) (TypeFun k2 x2 y2) = do
-  when (k1 /= k2) $ throwError (UnificationFailed k1 k2)
+  kindCheck k1 k2
   constrainTypes x1 x2
   constrainTypes y1 y2
   pure Nothing
 unifyType (TypeMetaVar x) y = metaVarBindType x y
 unifyType x (TypeMetaVar y) = metaVarBindType y x
-unifyType k1 k2 = do
+unifyType t1 t2 = do
   dump "Failed"
-  throwError (UnificationFailedType k1 k2)
+  throwError (UnificationFailedType t1 t2)
 
 unify :: Kind -> Kind -> Infer (Maybe (MetaVar, Kind))
 unify Type Type = pure Nothing
@@ -612,14 +617,46 @@ updateSubstitutionType m k = modifyTypeSub (M.map replaceInState . M.insert m k)
         TypeMetaVar mv | mv == m -> k
         z                        -> z
 
+class Substitution k where
+  metaVars :: k -> Set MetaVar
+  freeVars :: k -> Set Name
+
+instance Substitution (Exp a) where
+  metaVars _ = mempty
+
+  freeVars (Var _ x) = S.singleton x
+  freeVars (App _ f x) = freeVars f `S.union` freeVars x
+  freeVars (Lit _ _) = mempty
+
+instance Substitution Kind where
+  metaVars (KindMetaVar mv) = S.singleton mv
+  metaVars (KindFun k1 k2) = metaVars k1 `S.union` metaVars k2
+  metaVars _ = mempty
+
+  freeVars (KindVar (MkKindVar k)) = S.singleton k
+  freeVars (KindFun k1 k2) = freeVars k1 `S.union` freeVars k2
+  freeVars _ = mempty
+
+instance Substitution (Type a) where
+  metaVars (TypeApp _ t1 t2) = metaVars t1 `S.union` metaVars t2
+  metaVars (TypeFun _ t1 t2) = metaVars t1 `S.union` metaVars t2
+  metaVars (TypeMetaVar t)   = S.singleton t
+  metaVars _ = mempty
+
+  freeVars (TypeVar _ (TyVar tyVar)) = S.singleton tyVar
+  freeVars (TypeFun _ x y) = freeVars x `S.union` freeVars y
+  freeVars (TypeApp _ x y) = freeVars x `S.union` freeVars y
+  freeVars _ = mempty
+
+
 occursCheck :: MetaVar -> Kind -> Infer ()
 occursCheck mv k = do
   when (mv `S.member` metaVars k) $
     throwError (OccursCheckFailed mv k)
 
 occursCheckType :: MetaVar -> Type Kind -> Infer ()
-occursCheckType mv t = do
-  when (mv `S.member` metaVarsType t) $
+occursCheckType mv t =
+  when (mv `S.member` metaVars t) $
     throwError (OccursCheckFailedType mv t)
 
 modifySub :: (Subst -> Subst) -> Infer ()
@@ -933,7 +970,7 @@ elaborateDeclTyped (Declaration kind binding) = do
 elaborateBinding :: Binding () -> Infer (Binding MetaVar)
 elaborateBinding (Binding () name args body) = do
   mv <- lookupNamedType name
-  let fvs = S.unions (freeVarsExp <$> args)
+  let fvs = S.unions (freeVars <$> args)
   mvs <- fmap TypeMetaVar <$> populateEnv (S.toList fvs)
   args' <- traverse elaborateExp args
   body' <- elaborateExp body
@@ -1039,13 +1076,13 @@ elaboratePred (Pred () name typ) = do
   constrain class_  (KindMetaVar (ann type_) --> Constraint)
   pure (Pred mv name type_)
 
-getFreeVars :: [TyVar] -> [Method a] -> [TyVar]
+getFreeVars :: GetName name => [name] -> [Method a] -> [Name]
 getFreeVars vars methods = S.toList fvs
   where
     fvs =
       S.unions
       [ S.unions [ freeVars t | Method _ t <- methods ]
-      , S.fromList vars
+      , S.fromList (getName <$> vars)
       ]
 
 elaborateMethod :: Method () -> Infer (Method MetaVar)
@@ -1221,27 +1258,6 @@ constrainKinds k1 k2 = do
     e { constraints = Equality k1 k2 : constraints e
       }
 
-metaVars :: Kind -> Set MetaVar
-metaVars (KindFun k1 k2) = metaVars k1 `S.union` metaVars k2
-metaVars (KindMetaVar t) = S.singleton t
-metaVars _ = mempty
-
-metaVarsType :: Type Kind -> Set MetaVar
-metaVarsType (TypeApp _ t1 t2) = metaVarsType t1 `S.union` metaVarsType t2
-metaVarsType (TypeFun _ t1 t2) = metaVarsType t1 `S.union` metaVarsType t2
-metaVarsType (TypeMetaVar t)   = S.singleton t
-metaVarsType _ = mempty
-
-freeVars :: Type a -> Set TyVar
-freeVars (TypeVar _ tyVar) = S.singleton tyVar
-freeVars (TypeFun _ x y) = freeVars x `S.union` freeVars y
-freeVars (TypeApp _ x y) = freeVars x `S.union` freeVars y
-freeVars _ = mempty
-
-freeVarsExp :: Exp a -> Set Name
-freeVarsExp (Var _ x) = S.singleton x
-freeVarsExp (App _ f x) = freeVarsExp f `S.union` freeVarsExp x
-freeVarsExp (Lit _ _) = mempty
 
 generalizeDeclType :: Decl Kind (Type Kind) -> Maybe TypeScheme
 generalizeDeclType (Declaration _ (Binding t _ _ _)) = Just (generalizeType t)
@@ -1253,7 +1269,7 @@ generalizeBinding = generalizeType . ann
 generalizeType :: Type Kind -> TypeScheme
 generalizeType typ = TypeScheme vars (cataType quantify typ)
   where
-    metavars = S.toList (metaVarsType typ)
+    metavars = S.toList (metaVars typ)
     mapping  = zip (sort metavars) [0..]
     subs     = M.fromList mapping
     vars     = sort [ TyVar (showT v) | v <- snd <$> mapping ]
