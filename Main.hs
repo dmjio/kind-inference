@@ -65,6 +65,7 @@ data Exp a
 
 data Lit
   = LitInt Int
+  | LitChar Char
   deriving (Show, Eq)
 
 data Pred a = Pred a Name (Type a)
@@ -394,6 +395,7 @@ showExpVar x = parens (showExp x)
 
 showLit :: Lit -> String
 showLit (LitInt x) = show x
+showLit (LitChar x) = "'" <> [x] <> "'"
 
 beforeAll :: [a] -> [[a]] -> [a]
 beforeAll _ [] = []
@@ -837,17 +839,20 @@ tt :: IO ()
 tt = testInferType [ dec constFunc
                    , dec idFunc
                    , dec addOne
+                   , dec constChar
                    ]
   where
     idFunc = b "id" [ v "x" ] (v "x")
     constFunc = b "const" [ v "a", v "b" ] (v "a")
     addOne = b "addOne" [ v "x" ] (v "(+)" `appE` v "x" `appE` lint 1)
+    constChar = b "constChar" [ ] (v "const" `appE` char 'a')
 
     appE = App ()
     b = Binding ()
     dec = Declaration Type
     v = Var ()
     lint = Lit () . LitInt
+    char = Lit () . LitChar
 
 testInferType :: [Decl Kind ()] -> IO ()
 testInferType decls = do
@@ -984,10 +989,9 @@ elaborateExp :: Exp () -> Infer (Exp MetaVar)
 elaborateExp (Var () name) = do
   mv <- lookupNamedType name
   pure (Var mv name)
-elaborateExp (Lit () x) = do
-  mv <- fresh
-  constrainType mv (TypeCon Type (TyCon "Int"))
-  pure (Lit mv x)
+elaborateExp (Lit () lit) = do
+  mv <- elaborateLit lit
+  pure (Lit mv lit)
 elaborateExp (App () f x) = do
   fun <- elaborateExp f
   arg <- elaborateExp x
@@ -995,6 +999,16 @@ elaborateExp (App () f x) = do
   constrainType (ann fun)
     (TypeMetaVar (ann arg) --> TypeMetaVar mv)
   pure (App mv fun arg)
+
+elaborateLit :: Lit -> Infer MetaVar
+elaborateLit LitInt{} = do
+  mv <- fresh
+  constrainType mv (TypeCon Type (TyCon "Int"))
+  pure mv
+elaborateLit LitChar{} = do
+  mv <- fresh
+  constrainType mv (TypeCon Type (TyCon "Char"))
+  pure mv
 
 elaborateDecl :: Decl () () -> Infer (Decl MetaVar ())
 elaborateDecl decl = do
