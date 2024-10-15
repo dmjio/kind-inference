@@ -66,6 +66,8 @@ data Exp a
 data Lit
   = LitInt Int
   | LitChar Char
+  | LitString String
+  | LitDouble Double
   deriving (Show, Eq)
 
 data Pred a = Pred a Name (Type a)
@@ -396,6 +398,8 @@ showExpVar x = parens (showExp x)
 showLit :: Lit -> String
 showLit (LitInt x) = show x
 showLit (LitChar x) = "'" <> [x] <> "'"
+showLit (LitString x) = "\"" <> x <> "\""
+showLit (LitDouble x) = show x
 
 beforeAll :: [a] -> [[a]] -> [a]
 beforeAll _ [] = []
@@ -840,12 +844,16 @@ tt = testInferType [ dec constFunc
                    , dec idFunc
                    , dec addOne
                    , dec constChar
+                   , dec idStr
+                   , dec someDouble
                    ]
   where
     idFunc = b "id" [ v "x" ] (v "x")
     constFunc = b "const" [ v "a", v "b" ] (v "a")
     addOne = b "addOne" [ v "x" ] (v "(+)" `appE` v "x" `appE` lint 1)
     constChar = b "constChar" [ ] (v "const" `appE` char 'a')
+    idStr = b "idStr" [ ] (v "id" `appE` str "lol")
+    someDouble = b "double" [ ] (double 3.14)
 
     appE = App ()
     b = Binding ()
@@ -853,6 +861,8 @@ tt = testInferType [ dec constFunc
     v = Var ()
     lint = Lit () . LitInt
     char = Lit () . LitChar
+    str = Lit () . LitString
+    double = Lit () . LitDouble
 
 testInferType :: [Decl Kind ()] -> IO ()
 testInferType decls = do
@@ -1008,6 +1018,14 @@ elaborateLit LitInt{} = do
 elaborateLit LitChar{} = do
   mv <- fresh
   constrainType mv (TypeCon Type (TyCon "Char"))
+  pure mv
+elaborateLit LitString{} = do
+  mv <- fresh
+  constrainType mv (TypeCon Type (TyCon "String"))
+  pure mv
+elaborateLit LitDouble{} = do
+  mv <- fresh
+  constrainType mv (TypeCon Type (TyCon "Double"))
   pure mv
 
 elaborateDecl :: Decl () () -> Infer (Decl MetaVar ())
