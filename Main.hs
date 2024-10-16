@@ -34,7 +34,14 @@ data Decl kind typ
   | KindSignature kind Name Kind
   | Foreign kind Name (Type kind)
   | TypeSignature kind Name [Pred kind] (Type kind)
+  | Fixity Fixity (Maybe Int) [Name]
   | Declaration kind (Binding typ)
+  deriving (Show, Eq)
+
+data Fixity
+  = Infix
+  | Infixl
+  | Infixr
   deriving (Show, Eq)
 
 data Binding typ
@@ -92,6 +99,7 @@ instance GetName (Decl a typ) where
   getName (Instance _ _ p)      = getName p
   getName (Foreign _ name _)       = name
   getName (TypeSignature _ name _ _) = name
+  getName (Fixity _ _ names)        = intercalate "," names
   getName (Declaration _ binding) = getName binding
 
 instance GetName (Binding a) where
@@ -291,8 +299,9 @@ showDecl (TypeSyn a name vars typ) =
   intercalate " "
   [ "type"
   , if null (showAnn a) then name else parens (name <> " :: " <> showAnn a)
-  , intercalate " " [ v | TyVar v <- vars ]
-  , "="
+  , if null vars
+      then "="
+      else intercalate " " [ v | TyVar v <- vars ]
   , showType typ
   ]
 showDecl (Data a n vars xs) =
@@ -338,8 +347,9 @@ showDecl (Newtype a n vars variant) =
   , if null (showAnn a)
     then n
     else parens (n <> " :: " <> showAnn a)
-  , intercalate " " [ x | TyVar x <- vars ]
-  , "="
+  , if null vars
+      then "="
+      else intercalate " " [ x | TyVar x <- vars ]
   , showVariant variant
   ]
 showDecl (KindSignature _ name kind) =
@@ -374,10 +384,28 @@ showDecl (Foreign a name typ) =
      else parens (showType typ <> " :: " <> showAnn a)
   ]
 showDecl (Declaration _ binding) = showBinding binding
+showDecl (Fixity fixity precedence names) =
+  intercalate " "
+  [ showFixity fixity <>
+      case precedence of
+        Nothing -> ""
+        Just x -> " " <> show x
+  , intercalate ", " names
+  ]
+
+showFixity :: Fixity -> String
+showFixity Infix  = "infix"
+showFixity Infixl = "infixl"
+showFixity Infixr = "infixr"
 
 showBinding :: ShowAnn a => Binding a -> String
 showBinding (Binding _ name args body) =
-  name <> " " <> intercalate " " (showExp <$> args) <> " = " <> showExp body
+  intercalate " "
+  [ name
+  , if null args
+       then "= " <> showExp body
+       else intercalate " " (showExp <$> args) <> " = " <> showExp body
+  ]
 
 showExp :: Exp a -> String
 showExp (App _ f x) = showExpVar f <> " " <> showExp x
@@ -716,10 +744,11 @@ substituteDeclTyped (Foreign kind name typ) =
   pure (Foreign kind name typ)
 substituteDeclTyped (TypeSignature kind name args body) =
   pure (TypeSignature kind name args body)
+substituteDeclTyped (Fixity fixity precedence names) =
+  pure (Fixity fixity precedence names)
 substituteDeclTyped (Declaration k binding) = do
   b <- substituteBinding binding
   pure (Declaration k b)
-
 
 substituteBinding :: Binding MetaVar -> Infer (Binding (Type Kind))
 substituteBinding (Binding mv name args body) = do
@@ -789,6 +818,8 @@ substituteDecl (Foreign mv name typ) = do
   pure (Foreign k name t)
 substituteDecl (Declaration _ binding) = do
   pure (Declaration Type binding)
+substituteDecl (Fixity fixity precedence names) = do
+  pure (Fixity fixity precedence names)
 
 substitutePred
   :: Pred MetaVar
@@ -982,7 +1013,7 @@ inferKind decl = do
   elaborated <- elaborateDecl decl
   solve
   d <- substitute elaborated
-  pure (generalizeDecl d, d)
+  pure (generalize (annKind d), d)
 
 populateEnv :: GetName name => [name] -> Infer [MetaVar]
 populateEnv = mapM (addToEnv . getName)
@@ -1030,6 +1061,8 @@ elaborateDeclTyped (Foreign kind name typ) =
   pure (Foreign kind name typ)
 elaborateDeclTyped (TypeSignature kind name args body) =
   pure (TypeSignature kind name args body)
+elaborateDeclTyped (Fixity fixity precedence names) =
+  pure (Fixity fixity precedence names)
 
 elaborateBinding :: Binding () -> Infer (Binding MetaVar)
 elaborateBinding (Binding () name args body) = do
@@ -1090,7 +1123,7 @@ elaborateLit LitDouble{} = do
 elaborateDecl :: Decl () () -> Infer (Decl MetaVar ())
 elaborateDecl decl = do
   dbg "Elaborating..."
-  elaborate decl =<< addToEnv (getName decl)
+  elaborate decl
 
 handleKindSignature
   :: Name
@@ -1100,36 +1133,42 @@ handleKindSignature name mv = do
   result <- lookupKindEnv name
   forM_ result (constrain mv . KindMetaVar)
 
-elaborate :: Decl () () -> MetaVar -> Infer (Decl MetaVar ())
-elaborate (TypeSyn () name vars typ) mv = do
+elaborate :: Decl () () -> Infer (Decl MetaVar ())
+elaborate (TypeSyn () name vars typ) = do
+  mv <- addToEnv name
   handleKindSignature name mv
   mvs <- fmap KindMetaVar <$> populateEnv vars
   t <- elaborateType typ
   constrain mv (foldr KindFun (KindMetaVar (ann t)) mvs)
   pure (TypeSyn mv name vars t)
-elaborate (Data () name vars variants) mv = do
+elaborate (Data () name vars variants) = do
+  mv <- addToEnv name
   handleKindSignature name mv
   mvs <- fmap KindMetaVar <$> populateEnv vars
   vs <- traverse elaborateVariant variants
   constrain mv (foldr KindFun Type mvs)
   pure (Data mv name vars vs)
-elaborate (Newtype () name vars variant) mv = do
+elaborate (Newtype () name vars variant) = do
+  mv <- addToEnv name
   handleKindSignature name mv
   mvs <- fmap KindMetaVar <$> populateEnv vars
   v <- elaborateVariant variant
   constrain mv (foldr KindFun Type mvs)
   pure (Newtype mv name vars v)
-elaborate (Class () name vars methods) mv = do
+elaborate (Class () name vars methods) = do
+  mv <- addToEnv name
   handleKindSignature name mv
   void $ populateEnv (getFreeVars vars methods)
   methods_ <- traverse elaborateMethod methods
   mvs <- fmap KindMetaVar <$> traverse lookupName vars
   constrain mv (foldr KindFun Constraint mvs)
   pure (Class mv name vars methods_)
-elaborate (KindSignature () name kind) mv = do
+elaborate (KindSignature () name kind) = do
+  mv <- addToEnv name
   constrain mv kind
   pure (KindSignature mv name kind)
-elaborate (Instance () supers ctx) mv = do
+elaborate (Instance () supers ctx) = do
+  mv <- fresh
   addContextToEnv supers
   supers_ <- traverse elaboratePred supers
   forM_ supers_ $ \m -> constrain (ann m) Constraint
@@ -1137,7 +1176,8 @@ elaborate (Instance () supers ctx) mv = do
   constrain (ann ctx_) Constraint
   constrain (ann ctx_) (KindMetaVar mv)
   pure (Instance mv supers_ ctx_)
-elaborate (TypeSignature () name ctx typ) mv = do
+elaborate (TypeSignature () name ctx typ) = do
+  mv <- addToEnv name
   addContextToEnv ctx
   ctx_ <- traverse elaboratePred ctx
   forM_ ctx_ $ \m -> constrain (ann m) Constraint
@@ -1145,14 +1185,18 @@ elaborate (TypeSignature () name ctx typ) mv = do
   constrain (ann t) Type
   constrain mv (KindMetaVar (ann t))
   pure (TypeSignature mv name ctx_ t)
-elaborate (Foreign () name typ) mv = do
+elaborate (Foreign () name typ) = do
+  mv <- addToEnv name
   t <- elaborateType typ
   constrain (ann t) Type
   constrain (ann t) (KindMetaVar mv)
   pure (Foreign mv name t)
-elaborate (Declaration () binding) mv = do
+elaborate (Declaration () binding) = do
+  mv <- fresh
   constrain mv Type
   pure (Declaration mv binding)
+elaborate (Fixity fixity precedence names) =
+  pure (Fixity fixity precedence names)
 
 addContextToEnv :: [Pred ()] -> Infer ()
 addContextToEnv ctx = do
@@ -1314,15 +1358,16 @@ instance Ann Binding where
   ann (Binding t _ _ _) = t
 
 annKind :: Decl kind typ -> kind
-annKind (Data x _ _ _)    = x
-annKind (TypeSyn x _ _ _) = x
-annKind (Class x _ _ _)   = x
-annKind (Newtype x _ _ _) = x
-annKind (KindSignature x _ _) = x
+annKind (Data x _ _ _)          = x
+annKind (TypeSyn x _ _ _)       = x
+annKind (Class x _ _ _)         = x
+annKind (Newtype x _ _ _)       = x
+annKind (KindSignature x _ _)   = x
 annKind (TypeSignature x _ _ _) = x
-annKind (Instance x _ _) = x
-annKind (Foreign x _ _) = x
-annKind (Declaration x _) = x
+annKind (Instance x _ _)        = x
+annKind (Foreign x _ _)         = x
+annKind (Declaration x _)       = x
+annKind (Fixity _ _ _)          = error "no kind for fixity declaration"
 
 instance Ann Pred where
   ann (Pred x _ _)    = x
@@ -1374,17 +1419,6 @@ generalizeType typ = TypeScheme vars (cataType quantify typ)
       , (\k v -> k : show v) <$> ['a' .. 'z'] <*> [ 1 .. 99 :: Int ]
       ]
 
-generalizeDecl :: Decl Kind () -> Scheme
-generalizeDecl (Data k _ _ _)    = generalize k
-generalizeDecl (TypeSyn k _ _ _) = generalize k
-generalizeDecl (Class k _ _ _)   = generalize k
-generalizeDecl (Newtype k _ _ _) = generalize k
-generalizeDecl (KindSignature _ _ k) = generalize k
-generalizeDecl (TypeSignature k _ _ _) = generalize k
-generalizeDecl (Instance k _ _) = generalize k
-generalizeDecl (Foreign k _ _) = generalize k
-generalizeDecl (Declaration k _) = generalize k
-
 generalize :: Kind -> Scheme
 generalize kind = Scheme vars (cataKind quantify kind)
   where
@@ -1398,6 +1432,9 @@ generalize kind = Scheme vars (cataKind quantify kind)
 
     showKind_ 0 = "k"
     showKind_ n = "k" <> show n
+
+kk :: String
+kk = showDecl @() @() $ Fixity Infixr (Just 1) [ "---->" ]
 
 testInfer :: [Decl () ()] -> IO ()
 testInfer decs = do
@@ -1419,7 +1456,7 @@ main :: IO ()
 main = testInfer
   [ tree
   , lol
-  , maybe
+  , maybeD
   , person
   , statet
   , state
@@ -1437,8 +1474,8 @@ lol = Data () "LOL" [ TyVar "a", TyVar "b" ]
   [ Variant "LOL" [ app (app (tCon "Either") (tVar "a")) (tVar "b") ]
   ]
 
-maybe :: Decl () ()
-maybe = Data () "Maybe" [ TyVar "a" ]
+maybeD :: Decl () ()
+maybeD = Data () "Maybe" [ TyVar "a" ]
   [ Variant "Just" [ tVar "a" ]
   , Variant "Nothing" []
   ]
