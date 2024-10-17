@@ -79,7 +79,7 @@ data Lit
   deriving (Show, Eq)
 
 data Pred a = Pred a Name (Type a)
-  deriving (Show, Eq)
+  deriving (Show, Eq, Ord)
 
 data Method a = Method Name (Type a)
   deriving (Show, Eq)
@@ -91,16 +91,16 @@ instance GetName Name where
   getName = id
 
 instance GetName (Decl a typ) where
-  getName (Data _ name _ _)        = name
-  getName (TypeSyn _ name _ _)     = name
-  getName (Class _ name _ _)       = name
-  getName (Newtype _ name _ _)     = name
-  getName (KindSignature _ name _) = name
-  getName (Instance _ _ p)      = getName p
-  getName (Foreign _ name _)       = name
+  getName (Data _ name _ _)          = name
+  getName (TypeSyn _ name _ _)       = name
+  getName (Class _ name _ _)         = name
+  getName (Newtype _ name _ _)       = name
+  getName (KindSignature _ name _)   = name
+  getName (Instance _ _ p)           = getName p
+  getName (Foreign _ name _)         = name
   getName (TypeSignature _ name _ _) = name
-  getName (Fixity _ _ names)        = intercalate "," names
-  getName (Declaration _ binding) = getName binding
+  getName (Fixity _ _ names)         = intercalate "," names
+  getName (Declaration _ binding)    = getName binding
 
 instance GetName (Binding a) where
   getName (Binding _ name _ _) = name
@@ -210,6 +210,7 @@ showTypeScheme (TypeScheme vars k) =
 data Constraint
   = Equality Kind Kind
   | TypeEquality (Type Kind) (Type Kind)
+  | ClassConstraint (Pred Kind)
   deriving (Eq, Ord)
 
 instance Show Constraint where
@@ -223,6 +224,10 @@ showConstraint (Equality k1 k2) =
 showConstraint (TypeEquality t1 t2) =
   intercalate "\n"
   [ showType t1 <> " = " <> showType t2
+  ]
+showConstraint (ClassConstraint p) =
+  intercalate "\n"
+  [ showPred p
   ]
 
 data InferState
@@ -456,7 +461,19 @@ showVariant (Variant n ts) = intercalate " " (n : fmap showTypeVar ts)
 solve :: Infer ()
 solve = do
   dbg "Solving..."
+  sortConstraints
   solveConstraints
+
+sortConstraints :: Infer ()
+sortConstraints = do
+  dbg "Sorting constraints..."
+  cs <- gets constraints
+  let isClassConstraint ClassConstraint{} = True
+      isClassConstraint _ = False
+  setConstraints (sortBy (compare `on` isClassConstraint) cs)
+
+setConstraints :: [Constraint] -> Infer ()
+setConstraints xs = modify $ \s -> s { constraints = xs }
 
 solveConstraints :: Infer ()
 solveConstraints = do
@@ -470,6 +487,9 @@ solveConstraints = do
     Just (TypeEquality t1 t2) -> do
       mapM_ (uncurry applyType) =<< unifyType t1 t2
       solveConstraints
+    Just (ClassConstraint p) -> do
+      classConstraint p
+      solveConstraints
     where
       apply k v = do
         updateSubstitution k v
@@ -478,6 +498,9 @@ solveConstraints = do
       applyType k v = do
         updateSubstitutionType k v
         updateConstraintsType k v
+
+      classConstraint p =
+        dbg ("Got class for type: " <> show p)
 
 updateConstraints :: MetaVar -> Kind -> Infer ()
 updateConstraints m1 k = do
