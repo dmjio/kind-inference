@@ -1,3 +1,4 @@
+{-# LANGUAGE NoMonomorphismRestriction #-}
 module Main where
 
 import           Control.Monad
@@ -250,6 +251,7 @@ data Error
   | UnificationFailedType (Type Kind) (Type Kind)
   | OccursCheckFailed MetaVar Kind
   | OccursCheckFailedType MetaVar (Type Kind)
+  | Doesn'tOccurInInstanceHead Name (Pred ()) (Pred ())
 
 fresh :: Infer MetaVar
 fresh = do
@@ -282,6 +284,20 @@ instance Show Error where
     [ "Occurs check failed"
     , "MetaVar: " <> showMetaVar mv
     , "Type: " <> showType k
+    ]
+  show (Doesn'tOccurInInstanceHead name superPred@(Pred superName _) p) =
+    intercalate "\n"
+    [ intercalate " "
+      [ "Variable"
+      , name
+      , "in superclass"
+      , superName
+      , "doesn't appear in instance context"
+      , showPred p
+      ]
+    , "Variable: " <> name
+    , "Head: " <> showPred superPred
+    , "Context: " <> showPred p
     ]
 
 class ShowAnn a where
@@ -677,6 +693,10 @@ class Substitution k where
   metaVars :: k -> Set MetaVar
   freeVars :: k -> Set Name
 
+instance Substitution (Pred a) where
+  freeVars (Pred _ typ) = freeVars typ
+  metaVars (Pred _ typ) = metaVars typ
+
 instance Substitution a => Substitution [a] where
   freeVars = S.unions . fmap freeVars
   metaVars = S.unions . fmap metaVars
@@ -895,12 +915,14 @@ defaultKindEnv = M.fromList
   , ("Either", Scheme [] (Type --> Type --> Type))
   , ("Maybe", Scheme [] (Type --> Type))
   , ("Monad", Scheme [] ((Type --> Type) --> Constraint))
+  , ("Num", Scheme [] (Type --> Constraint))
   , ("Eq", Scheme [] (Type --> Constraint))
   , ("IO", Scheme [] (Type --> Type))
   , ("()", Scheme [] Type)
   , ("(->)", Scheme [] (Type --> Type --> Type))
   , ("StateT", Scheme [] (Type --> (Type --> Type) --> Type --> Type))
   , ("Identity", Scheme [] (Type --> Type))
+  , ("[]", Scheme [] (Type --> Type))
   ]
 
 runInfer :: Infer a -> IO (Either Error a)
@@ -1192,6 +1214,7 @@ elaborate (KindSignature name kind) = do
   constrain mv kind
   pure (KindSignature name kind)
 elaborate (Instance supers ctx) = do
+  checkInstanceHead supers ctx
   addContextToEnv supers
   supers_ <- traverse elaboratePred supers
   ctx_ <- elaboratePred ctx
@@ -1213,6 +1236,12 @@ elaborate (Declaration binding) =
 elaborate (Fixity fixity precedence names) =
   pure (Fixity fixity precedence names)
 
+checkInstanceHead :: [Pred ()] -> Pred () -> Infer ()
+checkInstanceHead supers ctx =
+  forM_ supers $ \superPred ->
+    forM_ (freeVars superPred `S.difference` freeVars ctx) $ \x ->
+      throwError (Doesn'tOccurInInstanceHead x superPred ctx)
+
 addContextToEnv :: [Pred ()] -> Infer ()
 addContextToEnv ctx = do
   let fvs = S.unions [ freeVars typ | Pred _ typ <- ctx ]
@@ -1222,7 +1251,7 @@ elaboratePred :: Pred () -> Infer (Pred MetaVar)
 elaboratePred (Pred name typ) = do
   class_ <- lookupName name
   type_ <- elaborateType typ
-  constrain class_  (KindMetaVar (ann type_) --> Constraint)
+  constrain class_ (KindMetaVar (ann type_) --> Constraint)
   pure (Pred name type_)
 
 getFreeVars :: GetName name => [name] -> [Method a] -> [Name]
@@ -1579,12 +1608,34 @@ okTest
   , TypeSyn () "OK" [] (tCon "Int")
   ]
 
-instTest :: IO ()
-instTest
+instTestFunctorMaybe :: IO ()
+instTestFunctorMaybe
   = testInfer
   [ functor
-  , Instance [] (Pred "Functor" (tCon "Maybe"))
+  , Instance
+      []
+      (Pred "Functor" (tCon "Maybe"))
   ]
+
+oops :: IO ()
+oops
+  = testInfer
+  [ functor
+  , Instance
+      [ Pred "Eq" (tVar "b") ]
+      (Pred "Functor" (tCon "Maybe"))
+  ]
+
+instTestNumEither :: IO ()
+instTestNumEither
+  = testInfer
+  [ functor
+  , Instance
+      [ Pred "Num" (tVar "a") ]
+      (Pred "Functor" (tCon "Either" `app` tCon "a"))
+  ]
+
+data List a = Nil | List a (List a)
 
 instTestFail :: IO ()
 instTestFail
@@ -1594,7 +1645,7 @@ instTestFail
   ]
 
 functor :: Decl () ()
-functor = (Class () "Functor" [ TyVar "f" ] [Method "fmap" fmap_])
+functor = Class () "Functor" [ TyVar "f" ] [Method "fmap" fmap_]
 
 foreignTest :: IO ()
 foreignTest
