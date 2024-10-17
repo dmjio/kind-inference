@@ -1239,7 +1239,7 @@ elaborate (Fixity fixity precedence names) =
 checkInstanceHead :: [Pred ()] -> Pred () -> Infer ()
 checkInstanceHead supers ctx =
   forM_ supers $ \superPred ->
-    forM_ (freeVars superPred `S.difference` freeVars ctx) $ \x ->
+    forM_ (freeVars ctx `S.difference` freeVars superPred) $ \x ->
       throwError (Doesn'tOccurInInstanceHead x superPred ctx)
 
 addContextToEnv :: [Pred ()] -> Infer ()
