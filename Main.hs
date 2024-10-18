@@ -34,7 +34,7 @@ data Decl kind typ
   | Newtype kind Name [TyVar] (Variant kind)
   | KindSignature Name Kind
   | Foreign Name (Type kind)
-  | TypeSignature Name [Pred kind] (Type kind)
+  | TypeSig Name [Pred kind] (Type kind)
   | Fixity Fixity (Maybe Int) [Name]
   | Declaration (Binding typ)
   deriving (Show, Eq)
@@ -99,7 +99,7 @@ instance GetName (Decl a typ) where
   getName (KindSignature name _)   = name
   getName (Instance _ p)           = getName p
   getName (Foreign name _)         = name
-  getName (TypeSignature name _ _) = name
+  getName (TypeSig name _ _) = name
   getName (Fixity _ _ names)       = intercalate "," names
   getName (Declaration binding)    = getName binding
 
@@ -382,7 +382,7 @@ showDecl (KindSignature name kind) =
   , "::"
   , showKind kind
   ]
-showDecl (TypeSignature name preds t) =
+showDecl (TypeSig name preds t) =
   intercalate " " $
   [ name
   , "::"
@@ -789,8 +789,8 @@ substituteDeclTyped (KindSignature name sig) =
   pure (KindSignature name sig)
 substituteDeclTyped (Foreign name typ) =
   pure (Foreign name typ)
-substituteDeclTyped (TypeSignature name args body) =
-  pure (TypeSignature name args body)
+substituteDeclTyped (TypeSig name args body) =
+  pure (TypeSig name args body)
 substituteDeclTyped (Fixity fixity precedence names) =
   pure (Fixity fixity precedence names)
 substituteDeclTyped (Declaration binding) = do
@@ -852,10 +852,10 @@ substituteDecl (Instance supers context) = do
   supers_ <- traverse substitutePred supers
   ctx_ <- substitutePred context
   pure (Instance supers_ ctx_)
-substituteDecl (TypeSignature name ctx typ) = do
+substituteDecl (TypeSig name ctx typ) = do
   ctx_ <- traverse substitutePred ctx
   t <- substituteType typ
-  pure (TypeSignature name ctx_ t)
+  pure (TypeSig name ctx_ t)
 substituteDecl (Foreign name typ) = do
   t <- substituteType typ
   pure (Foreign name t)
@@ -1001,7 +1001,7 @@ inferTypes
   :: [Decl Kind ()]
   -> IO (Either Error [Decl Kind (Type Kind)])
 inferTypes decls = runInfer $ do
-  addTypeSignatures decls
+  addTypeSigs decls
   addBindings decls
   forM decls $ \d -> do
     (maybeScheme, decl) <- inferType d
@@ -1031,10 +1031,10 @@ addKindSignatures decls = do
   let sigs = [ (name, generalize k) | KindSignature name k <- decls ]
   mapM_ (uncurry addToKindEnv) sigs
 
-addTypeSignatures :: [Decl Kind ()] -> Infer ()
-addTypeSignatures decls = do
+addTypeSigs :: [Decl Kind ()] -> Infer ()
+addTypeSigs decls = do
   let sigs = [ (name, generalizeType typ)
-             | TypeSignature name _ typ <- decls
+             | TypeSig name _ typ <- decls
              ]
   mapM_ (uncurry addToTypeEnv) sigs
 
@@ -1111,8 +1111,8 @@ elaborateDeclTyped (KindSignature name sig) =
   pure (KindSignature name sig)
 elaborateDeclTyped (Foreign name typ) =
   pure (Foreign name typ)
-elaborateDeclTyped (TypeSignature name args body) =
-  pure (TypeSignature name args body)
+elaborateDeclTyped (TypeSig name args body) =
+  pure (TypeSig name args body)
 elaborateDeclTyped (Fixity fixity precedence names) =
   pure (Fixity fixity precedence names)
 
@@ -1225,14 +1225,14 @@ elaborate (Instance supers ctx) = do
   supers_ <- traverse elaboratePred supers
   ctx_ <- elaboratePred ctx
   pure (Instance supers_ ctx_)
-elaborate (TypeSignature name ctx typ) = do
+elaborate (TypeSig name ctx typ) = do
   mv <- addToEnv name
   addContextToEnv ctx
   ctx_ <- traverse elaboratePred ctx
   t <- elaborateType typ
   constrain (ann t) Type
   constrain mv (KindMetaVar (ann t))
-  pure (TypeSignature name ctx_ t)
+  pure (TypeSig name ctx_ t)
 elaborate (Foreign name typ) = do
   t <- elaborateType typ
   constrain (ann t) Type
@@ -1414,7 +1414,7 @@ annKind (TypeSyn x _ _ _)       = x
 annKind (Class x _ _ _)         = x
 annKind (Newtype x _ _ _)       = x
 annKind (KindSignature _ k)     = k
-annKind (TypeSignature _ _ _)   = Type
+annKind (TypeSig _ _ _)   = Type
 annKind (Instance _ _)          = Constraint
 annKind (Foreign _ _)           = Type
 annKind (Declaration _)         = Type
@@ -1666,7 +1666,7 @@ typeSigTest = testInfer [ typeSig ]
 
 typeSig :: Decl () typ
 typeSig =
-  TypeSignature
+  TypeSig
     "f"
     [ Pred "Monad" (tVar "m")
     , Pred "Eq" (tVar "m" `app` tVar "a")
