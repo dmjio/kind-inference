@@ -46,7 +46,7 @@ data Fixity
   deriving (Show, Eq)
 
 data Binding typ
-  = Binding typ Name [Exp typ] (Exp typ)
+  = Binding typ Name [Pat typ] (Exp typ)
   deriving (Show, Eq)
 
 class Fun a where
@@ -70,7 +70,11 @@ data Exp a
   | Lit a Lit
   | App a (Exp a) (Exp a)
   | Lam a [Exp a] (Exp a)
+  -- Patterns
+  | As a Name (Pat a)
   deriving (Show, Eq)
+
+type Pat a = Exp a
 
 data Lit
   = LitInt Int
@@ -439,6 +443,12 @@ showExpVar (Lam _ args body) =
     , "->"
     , showExpVar body
     ]
+showExpVar (As _ name e) =
+  concat
+    [ name
+    , "@"
+    , showExpVar e
+    ]
 showExpVar x = parens (showExp x)
 
 
@@ -711,6 +721,10 @@ instance Substitution (Exp a) where
   freeVars (Lam _ args body) = freeVars body `S.difference` freeVars args
   freeVars (Lit _ _)         = mempty
 
+  -- NOTE: since this is used when elaborating binding args
+  -- we only return the name
+  freeVars (As _ name _)   = S.singleton name
+
 instance Substitution Kind where
   metaVars (KindMetaVar mv) = S.singleton mv
   metaVars (KindFun k1 k2)  = metaVars k1 `S.union` metaVars k2
@@ -730,7 +744,6 @@ instance Substitution (Type a) where
   freeVars (TypeFun _ x y) = freeVars x `S.union` freeVars y
   freeVars (TypeApp _ x y) = freeVars x `S.union` freeVars y
   freeVars _ = mempty
-
 
 occursCheck :: MetaVar -> Kind -> Infer ()
 occursCheck mv k = do
@@ -758,8 +771,7 @@ getKind :: MetaVar -> Infer Kind
 getKind mv = do
   result <- M.findWithDefault (KindMetaVar mv) mv <$> gets substitutions
   case generalize result of
-    scheme -> do
-      dbg $ "Got it -> " <> showKind (KindScheme scheme)
+    scheme ->
       pure (KindScheme scheme)
 
 getType :: MetaVar -> Infer (Type Kind)
@@ -821,6 +833,10 @@ substituteExp (Lam mv args body) = do
   args' <- traverse substituteExp args
   body' <- substituteExp body
   pure (Lam typ args' body')
+substituteExp (As mv name e) = do
+  typ <- getType mv
+  body <- substituteExp e
+  pure (As typ name body)
 
 substitute
   :: Decl MetaVar ()
@@ -955,6 +971,7 @@ tt = testInferType
   , dec lamConst
   , dec dollar
   , dec lamInt
+  , dec asEx
   ]
   where
     idFunc     = b "id" [ v "x" ] (v "x")
@@ -966,6 +983,7 @@ tt = testInferType
     lamConst   = b "lamConst" [ ] (lam [ v "x" ] (lam [ v "y" ] (v "x")))
     dollar     = b "($)" [ v "f", v "x" ] (v "f" `appE` v "x")
     lamInt     = b "lamInt" [] (lam [ v "x" ] (v "x") `appE` lint 100)
+    asEx       = b "asExp" [as "foo" (lint 1)] (v "foo")
 
     appE   = App ()
     b      = Binding ()
@@ -976,6 +994,7 @@ tt = testInferType
     str    = Lit () . LitString
     double = Lit () . LitDouble
     lam    = Lam ()
+    as     = As ()
 
 testInferType :: [Decl Kind ()] -> IO ()
 testInferType decls = do
@@ -1118,6 +1137,8 @@ elaborateDeclTyped (Fixity fixity precedence names) =
 
 elaborateBinding :: Binding () -> Infer (Binding MetaVar)
 elaborateBinding (Binding () name args body) = do
+  -- TODO: check for naming conflicts here? or do it in the renamer pass
+  -- e.g. foo x@(Just x) = undefined
   mv <- lookupNamedType name
   let fvs = S.unions (freeVars <$> args)
   mvs <- fmap TypeMetaVar <$> populateEnv (S.toList fvs)
@@ -1153,6 +1174,11 @@ elaborateExp (Lam () args body) = do
       (TypeMetaVar (ann body'))
       (fmap (TypeMetaVar . ann) args')
   pure (Lam mv args' body')
+elaborateExp (As () name pat) = do
+  mv <- lookupName name
+  pat' <- elaborateExp pat
+  constrainType mv (TypeMetaVar (ann pat'))
+  pure (As mv name pat')
 
 elaborateLit :: Lit -> Infer MetaVar
 elaborateLit LitInt{} = do
@@ -1397,6 +1423,7 @@ instance Ann Exp where
   ann (Lit x _) = x
   ann (App x _ _) = x
   ann (Lam x _ _) = x
+  ann (As x _ _) = x
 
 instance Ann Type where
   ann (TypeVar x _)   = x
