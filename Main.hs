@@ -146,10 +146,11 @@ data Kind
   | KindVar KindVar
   | KindMetaVar MetaVar
   | Constraint
+  | KindScheme Scheme
   deriving (Show, Eq, Ord)
 
 data Scheme = Scheme [Name] Kind
-  deriving (Show, Eq)
+  deriving (Show, Eq, Ord)
 
 showKind :: Kind -> String
 showKind (KindFun f x) = showKindVar f <> " -> " <> showKind x
@@ -160,6 +161,7 @@ showKindVar (KindVar (MkKindVar v))   = v
 showKindVar (KindMetaVar (MetaVar v)) = "{" <> show v <> "}"
 showKindVar Type                      = "*"
 showKindVar Constraint                = "Constraint"
+showKindVar (KindScheme scheme)       = showScheme scheme
 showKindVar x                         = parens (showKind x)
 
 cataType :: (Type a -> Type a) -> Type a -> Type a
@@ -753,9 +755,12 @@ modifyTypeSub f = do
   modify $ \s -> s { typeSubstitutions = f subs }
 
 getKind :: MetaVar -> Infer Kind
-getKind mv =
-  M.findWithDefault (KindMetaVar mv) mv <$>
-    gets substitutions
+getKind mv = do
+  result <- M.findWithDefault (KindMetaVar mv) mv <$> gets substitutions
+  case generalize result of
+    scheme -> do
+      dbg $ "Got it -> " <> showKind (KindScheme scheme)
+      pure (KindScheme scheme)
 
 getType :: MetaVar -> Infer (Type Kind)
 getType mv =
@@ -940,16 +945,17 @@ classT = testInferType
   ]
 
 tt :: IO ()
-tt = testInferType [ dec constFunc
-                   , dec idFunc
-                   , dec addOne
-                   , dec constChar
-                   , dec idStr
-                   , dec someDouble
-                   , dec lamConst
-                   , dec dollar
-                   , dec lamInt
-                   ]
+tt = testInferType
+  [ dec constFunc
+  , dec idFunc
+  , dec addOne
+  , dec constChar
+  , dec idStr
+  , dec someDouble
+  , dec lamConst
+  , dec dollar
+  , dec lamInt
+  ]
   where
     idFunc     = b "id" [ v "x" ] (v "x")
     constFunc  = b "const" [ v "a", v "b" ] (v "a")
@@ -1380,6 +1386,8 @@ cataKind f Type =
   f Type
 cataKind f Constraint =
   f Constraint
+cataKind f (KindScheme (Scheme xs k)) =
+  f (KindScheme (Scheme xs (cataKind f k)))
 
 class Ann a where
   ann :: a ann -> ann
