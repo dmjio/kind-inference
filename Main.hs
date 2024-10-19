@@ -70,6 +70,7 @@ data Exp a
   | Lit a Lit
   | App a (Exp a) (Exp a)
   | Lam a [Exp a] (Exp a)
+  | Con a Name [Pat a]
   -- Patterns
   | As a Name (Pat a)
   deriving (Show, Eq)
@@ -81,6 +82,7 @@ data Lit
   | LitChar Char
   | LitString String
   | LitDouble Double
+  | LitBool Bool
   deriving (Show, Eq)
 
 data Pred a = Pred Name (Type a)
@@ -451,14 +453,22 @@ showExpVar (As _ name e) =
     , "@"
     , showExpVar e
     ]
+showExpVar (Con _ name args) =
+  case args of
+    [] -> name
+    _ -> parens $
+     intercalate " "
+      [ name
+      , intercalate " " (showExpVar <$> args)
+      ]
 showExpVar x = parens (showExp x)
-
 
 showLit :: Lit -> String
 showLit (LitInt x) = show x
 showLit (LitChar x) = "'" <> [x] <> "'"
 showLit (LitString x) = "\"" <> x <> "\""
 showLit (LitDouble x) = show x
+showLit (LitBool x) = show x
 
 beforeAll :: [a] -> [[a]] -> [a]
 beforeAll _ [] = []
@@ -580,8 +590,12 @@ popConstraint = do
 
 kindCheck :: Kind -> Kind -> Infer ()
 kindCheck k1 k2 =
-  when (k1 /= k2) $
-    throwError (UnificationFailed k1 k2)
+  when (k1 /= k2) $ bail (UnificationFailed k1 k2)
+
+bail :: Error -> Infer a
+bail e = do
+  dump "bailing out"
+  throwError e
 
 unifyType
   :: Type Kind
@@ -605,7 +619,7 @@ unifyType (TypeMetaVar x) y = metaVarBindType x y
 unifyType x (TypeMetaVar y) = metaVarBindType y x
 unifyType t1 t2 = do
   dump "Failed"
-  throwError (UnificationFailedType t1 t2)
+  bail (UnificationFailedType t1 t2)
 
 unify :: Kind -> Kind -> Infer (Maybe (MetaVar, Kind))
 unify Type Type = pure Nothing
@@ -620,7 +634,7 @@ unify (KindMetaVar x) y = metaVarBind x y
 unify x (KindMetaVar y) = metaVarBind y x
 unify k1 k2 = do
   dump "Failed"
-  throwError (UnificationFailed k1 k2)
+  bail (UnificationFailed k1 k2)
 
 dump :: String -> Infer ()
 dump msg = do
@@ -740,6 +754,8 @@ instance Substitution (Exp a) where
   -- we only return the name
   freeVars (As _ name _)   = S.singleton name
 
+  freeVars (Con _ _ args)   = freeVars args
+
 instance Substitution Kind where
   metaVars (KindMetaVar mv) = S.singleton mv
   metaVars (KindFun k1 k2)  = metaVars k1 `S.union` metaVars k2
@@ -763,12 +779,12 @@ instance Substitution (Type a) where
 occursCheck :: MetaVar -> Kind -> Infer ()
 occursCheck mv k = do
   when (mv `S.member` metaVars k) $
-    throwError (OccursCheckFailed mv k)
+    bail (OccursCheckFailed mv k)
 
 occursCheckType :: MetaVar -> Type Kind -> Infer ()
 occursCheckType mv t =
   when (mv `S.member` metaVars t) $
-    throwError (OccursCheckFailedType mv t)
+    bail (OccursCheckFailedType mv t)
 
 modifySub :: (Subst -> Subst) -> Infer ()
 modifySub f = do
@@ -844,6 +860,10 @@ substituteExp :: Exp MetaVar -> Infer (Exp (Type Kind))
 substituteExp (Var mv name) = do
   typ <- getType mv
   pure (Var typ name)
+substituteExp (Con mv name args) = do
+  typ <- getType mv
+  args' <- traverse substituteExp args
+  pure (Con typ name args')
 substituteExp (Lit mv x) = do
   typ <- getType mv
   pure (Lit typ x)
@@ -988,6 +1008,15 @@ classT = testInferType
   [ Declaration $ Binding () "ten" [] $ Lit () (LitInt 10)
   ]
 
+-- | Constructor patterns
+isJustP :: IO ()
+isJustP = testInferType
+  [ maybeDT
+  , Declaration $
+      Binding () "isJust"
+        [ Con () "Nothing" [] ] $ Lit () (LitBool True)
+  ]
+
 tt :: IO ()
 tt = testInferType
   [ dec constFunc
@@ -1044,13 +1073,34 @@ testInferType decls = do
             putStrLn ""
           _ -> pure ()
 
+-- TODO: instead of this, return [TypeScheme] from `inferType`
+-- so you can add all the variants to the typeEnv
+addConstructors
+  :: [Decl Kind () ]
+  -> Infer ()
+addConstructors decls = mapM_ go decls
+  where
+    go (Data kind name args variants) = do
+      let tcon = mkTypeCon kind name args
+      forM_ variants $ \(Variant varName varArgs _) -> do
+        let t = foldr (-->) tcon varArgs
+        addToTypeEnv varName (generalizeType t)
+    go (Newtype kind name args (Variant varName varArgs _)) = do
+      let tcon = mkTypeCon kind name args
+          t = foldr (-->) tcon varArgs
+      dbg $ "Adding constructor: " <> varName <> " :: " <> showType t
+      addToTypeEnv name (generalizeType t)
+    go _ = pure ()
+
 inferTypes
   :: [Decl Kind ()]
   -> IO (Either Error [Decl Kind (Type Kind)])
 inferTypes decls = runInfer $ do
   addTypeSigs decls
   addBindings decls
+  addConstructors decls
   forM decls $ \d -> do
+    dbg ("Inferring type for decl: " <> showDecl d)
     (maybeScheme, decl) <- inferType d
     mapM_ (addToTypeEnv decl) maybeScheme
     dump "Done"
@@ -1187,10 +1237,11 @@ elaborateBinding (Binding () name args body) = do
   -- e.g. foo x@(Just x) = undefined
   mv <- lookupNamedType name
   let fvs = S.unions (freeVars <$> args)
-  mvs <- fmap TypeMetaVar <$> populateEnv (S.toList fvs)
+  _ <- fmap TypeMetaVar <$> populateEnv (S.toList fvs)
   args' <- traverse elaborateExp args
   body' <- elaborateExp body
-  constrainType mv (foldr tFun (TypeMetaVar (ann body')) mvs)
+  constrainType mv
+    (foldr tFun (TypeMetaVar (ann body')) (fmap (TypeMetaVar . ann) args'))
   pure (Binding mv name args' body')
 
 tFun :: Type Kind -> Type Kind -> Type Kind
@@ -1221,10 +1272,21 @@ elaborateExp (Lam () args body) = do
       (fmap (TypeMetaVar . ann) args')
   pure (Lam mv args' body')
 elaborateExp (As () name pat) = do
-  mv <- lookupName name
+  mv <- lookupNamedType name
   pat' <- elaborateExp pat
   constrainType mv (TypeMetaVar (ann pat'))
   pure (As mv name pat')
+elaborateExp (Con () name args) = do
+  _ <- populateEnv $ S.toList (freeVars args)
+  mv <- fresh
+  con <- lookupNamedType name
+  args' <- traverse elaborateExp args
+  constrainType mv
+    (foldr
+       (TypeApp Type)
+       (TypeMetaVar con)
+       (TypeMetaVar . ann <$> args'))
+  pure (Con mv name args')
 
 elaborateLit :: Lit -> Infer MetaVar
 elaborateLit LitInt{} = do
@@ -1242,6 +1304,10 @@ elaborateLit LitString{} = do
 elaborateLit LitDouble{} = do
   mv <- fresh
   constrainType mv (TypeCon Type (TyCon "Double"))
+  pure mv
+elaborateLit LitBool{} = do
+  mv <- fresh
+  constrainType mv (TypeCon Type (TyCon "Bool"))
   pure mv
 
 elaborateDecl :: Decl () () -> Infer (Decl MetaVar ())
@@ -1322,7 +1388,7 @@ checkInstanceHead :: [Pred ()] -> Pred () -> Infer ()
 checkInstanceHead supers ctx =
   forM_ supers $ \superPred ->
     forM_ (freeVars ctx `S.difference` freeVars superPred) $ \x ->
-      throwError (Doesn'tOccurInInstanceHead x superPred ctx)
+      bail (Doesn'tOccurInInstanceHead x superPred ctx)
 
 addContextToEnv :: [Pred ()] -> Infer ()
 addContextToEnv ctx = do
@@ -1405,7 +1471,7 @@ lookupName named = do
     Nothing -> do
       env <- gets env
       case M.lookup name env of
-        Nothing -> throwError (UnboundName name)
+        Nothing -> bail (UnboundName name)
         Just v -> pure v
 
 lookupNamedType :: GetName name => name -> Infer MetaVar
@@ -1421,7 +1487,7 @@ lookupNamedType named = do
     Nothing -> do
       env <- gets env
       case M.lookup name env of
-        Nothing -> throwError (UnboundName name)
+        Nothing -> bail (UnboundName name)
         Just v -> pure v
 
 instantiate :: Name -> Scheme -> Infer Kind
@@ -1474,6 +1540,7 @@ instance Ann Exp where
   ann (App x _ _) = x
   ann (Lam x _ _) = x
   ann (As x _ _) = x
+  ann (Con x _ _) = x
 
 instance Ann Type where
   ann (TypeVar x _)   = x
@@ -1611,6 +1678,12 @@ lol = Data () "LOL" [ tVar "a", tVar "b" ]
 maybeD :: Decl () ()
 maybeD = Data () "Maybe" [ tVar "a" ]
   [ Variant "Just" [ tVar "a" ] ()
+  , Variant "Nothing" [] ()
+  ]
+
+maybeDT :: Decl Kind ()
+maybeDT = Data (Type --> Type) "Maybe" [ TypeVar Type (TyVar "a") ]
+  [ Variant "Just" [ TypeVar Type (TyVar "a") ] ()
   , Variant "Nothing" [] ()
   ]
 
