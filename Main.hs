@@ -36,7 +36,7 @@ data Decl kind typ
   | Foreign Name (Type kind)
   | TypeSig Name [Pred kind] (Type kind)
   | Fixity Fixity (Maybe Int) [Name]
-  | Declaration typ [Binding typ]
+  | Declaration typ [Binding kind typ]
   deriving (Show, Eq)
 
 data Fixity
@@ -45,8 +45,8 @@ data Fixity
   | Infixr
   deriving (Show, Eq)
 
-data Binding typ
-  = Binding typ Name [Pat typ] (Exp typ)
+data Binding kind typ
+  = Binding typ Name [Pat kind typ] (Exp kind typ)
   deriving (Show, Eq)
 
 class Fun a where
@@ -65,17 +65,20 @@ instance Fun (Type Kind) where
   (-->) :: Type Kind -> Type Kind -> Type Kind
   (-->) = TypeFun Type
 
-data Exp a
-  = Var a Name
-  | Lit a Lit
-  | App a (Exp a) (Exp a)
-  | Lam a [Exp a] (Exp a)
-  | Con a Name [Pat a]
+data Exp kind typ
+  = Var typ Name
+  | Lit typ Lit
+  | App typ (Exp kind typ) (Exp kind typ)
+  | Lam typ [Exp kind typ] (Exp kind typ)
   -- Patterns
-  | As a Name (Pat a)
+  | As typ Name (Pat kind typ)
+  | Con typ Name [Pat kind typ]
+  | Wildcard typ
+  -- Others
+  | TypeAnn (Type kind) (Exp kind typ)
   deriving (Show, Eq)
 
-type Pat a = Exp a
+type Pat typ kind = Exp typ kind
 
 data Lit
   = LitInt Int
@@ -110,7 +113,7 @@ instance GetName (Decl a typ) where
   getName (Declaration _ [])       = error "no bindings"
   getName (Declaration _ (b:_))    = getName b
 
-instance GetName (Binding a) where
+instance GetName (Binding kind a) where
   getName (Binding _ name _ _) = name
 
 instance GetName (Pred a) where
@@ -427,7 +430,7 @@ showFixity Infix  = "infix"
 showFixity Infixl = "infixl"
 showFixity Infixr = "infixr"
 
-showBinding :: ShowAnn a => Binding a -> String
+showBinding :: (ShowAnn typ, ShowAnn kind) => Binding kind typ -> String
 showBinding (Binding _ name args body) =
   intercalate " "
   [ name
@@ -436,13 +439,15 @@ showBinding (Binding _ name args body) =
        else intercalate " " (showExp <$> args) <> " = " <> showExp body
   ]
 
-showExp :: Exp a -> String
+showExp :: ShowAnn kind => Exp kind typ -> String
 showExp (App _ f x) = showExpVar f <> " " <> showExp x
 showExp x = showExpVar x
 
-showExpVar :: Exp a -> String
+showExpVar :: ShowAnn kind => Exp kind typ -> String
 showExpVar (Var _ name) = name
 showExpVar (Lit _ lit) = showLit lit
+showExpVar (Wildcard _) = "_"
+showExpVar (TypeAnn t e) = parens (showExp e <> " :: " <> showType t)
 showExpVar (Lam _ args body) =
   parens $ '\\' : intercalate " "
     [ intercalate " " (showExpVar <$> args)
@@ -748,13 +753,15 @@ instance Substitution a => Substitution [a] where
   freeVars = S.unions . fmap freeVars
   metaVars = S.unions . fmap metaVars
 
-instance Substitution (Exp a) where
+instance Substitution (Exp kind a) where
   metaVars _ = mempty
 
   freeVars (Var _ x)         = S.singleton x
   freeVars (App _ f x)       = freeVars f `S.union` freeVars x
   freeVars (Lam _ args body) = freeVars body `S.difference` freeVars args
-  freeVars (Lit _ _)         = mempty
+  freeVars (Lit _ _)       = mempty
+  freeVars (Wildcard _)    = mempty
+  freeVars (TypeAnn _ e)   = freeVars e
 
   -- NOTE: since this is used when elaborating binding args
   -- we only return the name
@@ -853,41 +860,48 @@ substituteDeclTyped (Fixity fixity precedence names) =
   pure (Fixity fixity precedence names)
 substituteDeclTyped (Declaration typ bindings) = do
   t <- getType typ
-  bs <- traverse substituteBinding bindings
+  bs <- traverse substituteBindingType bindings
   pure (Declaration t bs)
 
-substituteBinding :: Binding MetaVar -> Infer (Binding (Type Kind))
-substituteBinding (Binding mv name args body) = do
+substituteBindingType
+  :: Binding Kind MetaVar -> Infer (Binding Kind (Type Kind))
+substituteBindingType (Binding mv name args body) = do
   typ <- getType mv
-  args' <- traverse substituteExp args
-  body' <- substituteExp body
+  args' <- traverse substituteExpType args
+  body' <- substituteExpType body
   pure (Binding typ name args' body')
 
-substituteExp :: Exp MetaVar -> Infer (Exp (Type Kind))
-substituteExp (Var mv name) = do
+substituteExpType :: Exp Kind MetaVar -> Infer (Exp Kind (Type Kind))
+substituteExpType (Var mv name) = do
   typ <- getType mv
   pure (Var typ name)
-substituteExp (Con mv name args) = do
+substituteExpType (Con mv name args) = do
   typ <- getType mv
-  args' <- traverse substituteExp args
+  args' <- traverse substituteExpType args
   pure (Con typ name args')
-substituteExp (Lit mv x) = do
+substituteExpType (Lit mv x) = do
   typ <- getType mv
   pure (Lit typ x)
-substituteExp (App mv f x) = do
+substituteExpType (App mv f x) = do
   typ <- getType mv
-  fun <- substituteExp f
-  arg <- substituteExp x
+  fun <- substituteExpType f
+  arg <- substituteExpType x
   pure (App typ fun arg)
-substituteExp (Lam mv args body) = do
+substituteExpType (Lam mv args body) = do
   typ <- getType mv
-  args' <- traverse substituteExp args
-  body' <- substituteExp body
+  args' <- traverse substituteExpType args
+  body' <- substituteExpType body
   pure (Lam typ args' body')
-substituteExp (As mv name e) = do
+substituteExpType (As mv name e) = do
   typ <- getType mv
-  body <- substituteExp e
+  body <- substituteExpType e
   pure (As typ name body)
+substituteExpType (Wildcard mv) = do
+  typ <- getType mv
+  pure (Wildcard typ)
+substituteExpType (TypeAnn t e) = do
+  e' <- substituteExpType e
+  pure (TypeAnn t e')
 
 substitute
   :: Decl MetaVar ()
@@ -930,10 +944,43 @@ substituteDecl (TypeSig name ctx typ) = do
 substituteDecl (Foreign name typ) = do
   t <- substituteType typ
   pure (Foreign name t)
-substituteDecl (Declaration typ binding) =
-  pure (Declaration typ binding)
+substituteDecl (Declaration typ bindings) = do
+  b <- traverse substituteBinding bindings
+  pure (Declaration typ b)
 substituteDecl (Fixity fixity precedence names) = do
   pure (Fixity fixity precedence names)
+
+substituteBinding :: Binding MetaVar () -> Infer (Binding Kind ())
+substituteBinding (Binding t name pats ex) = do
+  ps <- traverse substituteExp pats
+  e <- substituteExp ex
+  pure (Binding t name ps e)
+
+substituteExp :: Exp MetaVar () -> Infer (Exp Kind ())
+substituteExp (Var () n) =
+  pure (Var () n)
+substituteExp (Lit () n) =
+  pure (Lit () n)
+substituteExp (App typ e1 e2) = do
+  e1' <- substituteExp e1
+  e2' <- substituteExp e2
+  pure (App typ e1' e2')
+substituteExp (Lam () args e) = do
+  args' <- traverse substituteExp args
+  ex <- substituteExp e
+  pure (Lam () args' ex)
+substituteExp (As () n e) = do
+  ex <- substituteExp e
+  pure (As () n ex)
+substituteExp (Con () n args) = do
+  args' <- traverse substituteExp args
+  pure (Con () n args')
+substituteExp (Wildcard ()) = do
+  pure (Wildcard ())
+substituteExp (TypeAnn t e) = do
+  t' <- substituteType t
+  ex <- substituteExp e
+  pure (TypeAnn t' ex)
 
 substitutePred
   :: Pred MetaVar
@@ -1016,18 +1063,36 @@ classT = testInferType
   ]
 
 -- | Constructor patterns
-isJustP :: IO ()
-isJustP = testInferType
+-- TODO: fix me, type schemes aren't getting generalized properly
+-- -- Unification type failed
+-- -- Type: String
+-- -- Type: (a :: *)
+isJustWildTypeAnn :: IO ()
+isJustWildTypeAnn = testInferType
   [ maybeDT
   , Declaration ()
       [ Binding () "isJust"
           [ Con () "Nothing" []
-          ] $ Lit () (LitBool True)
+          ] $ Lit () (LitBool False)
       , Binding () "isJust"
-          [ Con () "Just" [ Var () "x" ]
+          [ Con () "Just" [ TypeAnn tString (Wildcard ()) ]
           ] $ Lit () (LitBool True)
       ]
   ]
+
+constDecStr :: IO ()
+constDecStr = testInferType
+  [ Declaration ()
+      [ Binding () "const"
+          [ Var () "x"
+          , TypeAnn tString (Wildcard ())
+          ]
+          (Var () "x")
+      ]
+  ]
+
+tString :: Type Kind
+tString = TypeCon Type (TyCon "String")
 
 tt :: IO ()
 tt = testInferType
@@ -1219,7 +1284,7 @@ mkTypeCon k n = foldl (TypeApp Type) (TypeCon k (TyCon n))
 elaborateDeclTyped :: Decl Kind () -> Infer (Decl Kind MetaVar)
 elaborateDeclTyped (Declaration () bindings) = do
   mv <- fresh
-  bs <- traverse elaborateBinding bindings
+  bs <- traverse elaborateBindingType bindings
   forM_ bs $ \b ->
     constrainType mv (TypeMetaVar (ann b))
   pure (Declaration mv bs)
@@ -1246,62 +1311,97 @@ elaborateDeclTyped (TypeSig name args body) =
 elaborateDeclTyped (Fixity fixity precedence names) =
   pure (Fixity fixity precedence names)
 
-elaborateBinding :: Binding () -> Infer (Binding MetaVar)
-elaborateBinding (Binding () name args body) = do
+elaborateBindingType :: Binding Kind () -> Infer (Binding Kind MetaVar)
+elaborateBindingType (Binding () name args body) = do
   -- TODO: check for naming conflicts here? or do it in the renamer pass
   -- e.g. foo x@(Just x) = undefined
   mv <- lookupNamedType name
   let fvs = S.unions (freeVars <$> args)
   _ <- fmap TypeMetaVar <$> populateEnv (S.toList fvs)
-  args' <- traverse elaborateExp args
-  body' <- elaborateExp body
+  args' <- traverse elaborateExpType args
+  body' <- elaborateExpType body
   constrainType mv $
     foldr tFun (TypeMetaVar (ann body'))
     (TypeMetaVar . ann <$> args')
   pure (Binding mv name args' body')
 
+elaborateExp
+  :: Exp () ()
+  -> Infer (Exp MetaVar ())
+elaborateExp (Var () n) = do
+  pure (Var () n)
+elaborateExp (Lit () n) = do
+  pure (Lit () n)
+elaborateExp (App () e1 e2) = do
+  e1' <- elaborateExp e1
+  e2' <- elaborateExp e2
+  pure (App () e1' e2')
+elaborateExp (Lam () args e) = do
+  as <- traverse elaborateExp args
+  e' <- elaborateExp e
+  pure (Lam () as e')
+elaborateExp (As () n e) = do
+  e' <- elaborateExp e
+  pure (As () n e')
+elaborateExp (Con () n args) = do
+  as <- traverse elaborateExp args
+  pure (Con () n as)
+elaborateExp (Wildcard ()) = do
+  pure (Wildcard ())
+elaborateExp (TypeAnn t e) = do
+  t' <- elaborateType t
+  e' <- elaborateExp e
+  pure (TypeAnn t' e')
+
 tFun :: Type Kind -> Type Kind -> Type Kind
 tFun = TypeFun Type
 
-elaborateExp :: Exp () -> Infer (Exp MetaVar)
-elaborateExp (Var () name) = do
+elaborateExpType :: Exp Kind () -> Infer (Exp Kind MetaVar)
+elaborateExpType (Var () name) = do
   mv <- lookupNamedType name
   pure (Var mv name)
-elaborateExp (Lit () lit) = do
+elaborateExpType (Lit () lit) = do
   mv <- elaborateLit lit
   pure (Lit mv lit)
-elaborateExp (App () f x) = do
-  fun <- elaborateExp f
-  arg <- elaborateExp x
+elaborateExpType (Wildcard ()) = do
+  mv <- fresh
+  pure (Wildcard mv)
+elaborateExpType (App () f x) = do
+  fun <- elaborateExpType f
+  arg <- elaborateExpType x
   mv <- fresh
   constrainType (ann fun)
     (TypeMetaVar (ann arg) --> TypeMetaVar mv)
   pure (App mv fun arg)
-elaborateExp (Lam () args body) = do
+elaborateExpType (Lam () args body) = do
   void $ populateEnv $ S.toList (freeVars args)
-  args' <- traverse elaborateExp args
-  body' <- elaborateExp body
+  args' <- traverse elaborateExpType args
+  body' <- elaborateExpType body
   mv <- fresh
   constrainType mv $
     foldr (-->)
       (TypeMetaVar (ann body'))
       (fmap (TypeMetaVar . ann) args')
   pure (Lam mv args' body')
-elaborateExp (As () name pat) = do
+elaborateExpType (As () name pat) = do
   mv <- lookupNamedType name
-  pat' <- elaborateExp pat
+  pat' <- elaborateExpType pat
   constrainType mv (TypeMetaVar (ann pat'))
   pure (As mv name pat')
-elaborateExp (Con () name args) = do
+elaborateExpType (Con () name args) = do
   _ <- populateEnv $ S.toList (freeVars args)
   mv <- fresh
   con <- lookupNamedType name
-  args' <- traverse elaborateExp args
+  args' <- traverse elaborateExpType args
   constrainType con
     (foldr tFun
        (TypeMetaVar mv)
        (TypeMetaVar . ann <$> args'))
   pure (Con mv name args')
+elaborateExpType (TypeAnn t e) = do
+  e' <- elaborateExpType e
+  constrainTypes t (TypeMetaVar (ann e'))
+  pure (TypeAnn t e')
 
 elaborateLit :: Lit -> Infer MetaVar
 elaborateLit LitInt{} = do
@@ -1394,10 +1494,19 @@ elaborate (Foreign name typ) = do
   t <- elaborateType typ
   constrain (ann t) Type
   pure (Foreign name t)
-elaborate (Declaration () binding) =
-  pure (Declaration () binding)
+elaborate (Declaration () bindings) = do
+  bs <- traverse elaborateBinding bindings
+  pure (Declaration () bs)
 elaborate (Fixity fixity precedence names) =
   pure (Fixity fixity precedence names)
+
+elaborateBinding
+  :: Binding () ()
+  -> Infer (Binding MetaVar ())
+elaborateBinding (Binding () name pats e) = do
+  ps <- traverse elaborateExp pats
+  ex <- elaborateExp e
+  pure (Binding () name ps ex)
 
 checkInstanceHead :: [Pred ()] -> Pred () -> Infer ()
 checkInstanceHead supers ctx =
@@ -1549,13 +1658,15 @@ cataKind f (KindScheme (Scheme xs k)) =
 class Ann a where
   ann :: a ann -> ann
 
-instance Ann Exp where
-  ann (Var x _) = x
-  ann (Lit x _) = x
-  ann (App x _ _) = x
-  ann (Lam x _ _) = x
-  ann (As x _ _) = x
-  ann (Con x _ _) = x
+instance Ann (Exp typ) where
+  ann (Var x _)     = x
+  ann (Lit x _)     = x
+  ann (App x _ _)   = x
+  ann (Lam x _ _)   = x
+  ann (As x _ _)    = x
+  ann (Con x _ _)   = x
+  ann (Wildcard x)  = x
+  ann (TypeAnn _ x) = ann x
 
 instance Ann Type where
   ann (TypeVar x _)   = x
@@ -1564,7 +1675,7 @@ instance Ann Type where
   ann (TypeFun x _ _) = x
   ann (TypeMetaVar _) = error "Called 'ann' on a MetaVar"
 
-instance Ann Binding where
+instance Ann (Binding typ) where
   ann (Binding t _ _ _) = t
 
 annKind :: Decl Kind typ -> Kind
@@ -1603,7 +1714,7 @@ generalizeDeclType :: Decl Kind (Type Kind) -> Maybe TypeScheme
 generalizeDeclType (Declaration t _) = Just (generalizeType t)
 generalizeDeclType _ = Nothing
 
-generalizeBinding :: Binding (Type Kind) -> TypeScheme
+generalizeBinding :: Binding Kind (Type Kind) -> TypeScheme
 generalizeBinding = generalizeType . ann
 
 generalizeType :: Type Kind -> TypeScheme
