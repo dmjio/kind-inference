@@ -1089,10 +1089,6 @@ classT = testInferType
   ]
 
 -- | Constructor patterns
--- TODO: fix me, type schemes aren't getting generalized properly
--- -- Unification type failed
--- -- Type: String
--- -- Type: (a :: *)
 isJustWildTypeAnn :: IO ()
 isJustWildTypeAnn = testInferType
   [ maybeDT
@@ -1116,6 +1112,16 @@ ifThenElseEx = testInferType
              (Lit () (LitBool True))
               (Lit () (LitInt 1))
               (Lit () (LitInt 2)))
+      ]
+  ]
+
+idstr :: IO ()
+idstr = testInferType
+  [ Declaration ()
+      [ Binding () "id"
+          [ TypeAnn tString (Var () "x")
+          ]
+          (Var () "x")
       ]
   ]
 
@@ -1201,6 +1207,8 @@ addConstructors decls = mapM_ go decls
       let tcon = mkTypeCon kind name args
       forM_ variants $ \(Variant varName varArgs _) -> do
         let t = foldr (-->) tcon varArgs
+        dbg $ "adding: " <> show t
+        dbg $ "adding: " <> show (generalizeType t)
         addToTypeEnv varName (generalizeType t)
     go (Newtype kind name args (Variant varName varArgs _)) = do
       let tcon = mkTypeCon kind name args
@@ -1778,7 +1786,7 @@ generalizeType typ = TypeScheme vars (cataType quantify typ)
     metavars = S.toList (metaVars typ)
     mapping  = zip (sort metavars) [0..]
     subs     = M.fromList mapping
-    vars     = sort [ showT v | v <- snd <$> mapping ]
+    vars     = S.toList (freeVars typ)
 
     quantify (TypeMetaVar m) = TypeVar Type (TyVar (showT (subs M.! m)))
     quantify k               = k
@@ -1798,7 +1806,7 @@ generalize kind = Scheme vars (cataKind quantify kind)
     metavars = S.toList (metaVars kind)
     mapping = zip (sort metavars) [ 0 :: Int .. ]
     subs = M.fromList mapping
-    vars = sort [ showKind_ v | v <- snd <$> mapping ]
+    vars = S.toList (freeVars kind)
 
     quantify (KindMetaVar m) = KindVar (MkKindVar (showKind_ (subs M.! m)))
     quantify k               = k
