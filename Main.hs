@@ -74,6 +74,7 @@ data Exp kind typ
   | As typ Name (Pat kind typ)
   | Con typ Name [Pat kind typ]
   | Wildcard typ
+  | IfThenElse typ (Exp kind typ) (Exp kind typ) (Exp kind typ)
   -- Others
   | TypeAnn (Type kind) (Exp kind typ)
   deriving (Show, Eq)
@@ -439,14 +440,26 @@ showBinding (Binding _ name args body) =
        else intercalate " " (showExp <$> args) <> " = " <> showExp body
   ]
 
-showExp :: ShowAnn kind => Exp kind typ -> String
+showExp :: (ShowAnn typ, ShowAnn kind) => Exp kind typ -> String
 showExp (App _ f x) = showExpVar f <> " " <> showExp x
 showExp x = showExpVar x
 
-showExpVar :: ShowAnn kind => Exp kind typ -> String
+showExpVar :: (ShowAnn kind, ShowAnn typ) => Exp kind typ -> String
 showExpVar (Var _ name) = name
 showExpVar (Lit _ lit) = showLit lit
 showExpVar (Wildcard _) = "_"
+showExpVar (IfThenElse t c e1 e2) =
+  intercalate " "
+  [ "if"
+  , showExp c
+  , "then"
+  , showExp e1
+  , "else"
+  , showExp e2 <>
+      if not $ null (showAnn t)
+      then " :: " <> showAnn t
+      else ""
+  ]
 showExpVar (TypeAnn t e) = parens (showExp e <> " :: " <> showType t)
 showExpVar (Lam _ args body) =
   parens $ '\\' : intercalate " "
@@ -762,6 +775,8 @@ instance Substitution (Exp kind a) where
   freeVars (Lit _ _)       = mempty
   freeVars (Wildcard _)    = mempty
   freeVars (TypeAnn _ e)   = freeVars e
+  freeVars (IfThenElse _ cond e1 e2)   =
+    freeVars cond <> freeVars e1 <> freeVars e2
 
   -- NOTE: since this is used when elaborating binding args
   -- we only return the name
@@ -902,6 +917,12 @@ substituteExpType (Wildcard mv) = do
 substituteExpType (TypeAnn t e) = do
   e' <- substituteExpType e
   pure (TypeAnn t e')
+substituteExpType (IfThenElse mv cond e1 e2) = do
+  typ <- getType mv
+  cond' <- substituteExpType cond
+  e1' <- substituteExpType e1
+  e2' <- substituteExpType e2
+  pure (IfThenElse typ cond' e1' e2')
 
 substitute
   :: Decl MetaVar ()
@@ -981,6 +1002,11 @@ substituteExp (TypeAnn t e) = do
   t' <- substituteType t
   ex <- substituteExp e
   pure (TypeAnn t' ex)
+substituteExp (IfThenElse () cond e1 e2) = do
+  cond' <- substituteExp cond
+  e1' <- substituteExp e1
+  e2' <- substituteExp e2
+  pure (IfThenElse () cond' e1' e2')
 
 substitutePred
   :: Pred MetaVar
@@ -1077,6 +1103,19 @@ isJustWildTypeAnn = testInferType
       , Binding () "isJust"
           [ Con () "Just" [ TypeAnn tString (Wildcard ()) ]
           ] $ Lit () (LitBool True)
+      ]
+  ]
+
+ifThenElseEx :: IO ()
+ifThenElseEx = testInferType
+  [ Declaration ()
+      [ Binding () "foo"
+          [ Var () "x"
+          ]
+          (IfThenElse ()
+             (Lit () (LitBool True))
+              (Lit () (LitInt 1))
+              (Lit () (LitInt 2)))
       ]
   ]
 
@@ -1352,6 +1391,11 @@ elaborateExp (TypeAnn t e) = do
   t' <- elaborateType t
   e' <- elaborateExp e
   pure (TypeAnn t' e')
+elaborateExp (IfThenElse () cond e1 e2) = do
+  c <- elaborateExp cond
+  e1' <- elaborateExp e1
+  e2' <- elaborateExp e2
+  pure (IfThenElse () c e1' e2')
 
 tFun :: Type Kind -> Type Kind -> Type Kind
 tFun = TypeFun Type
@@ -1402,6 +1446,16 @@ elaborateExpType (TypeAnn t e) = do
   e' <- elaborateExpType e
   constrainTypes t (TypeMetaVar (ann e'))
   pure (TypeAnn t e')
+elaborateExpType (IfThenElse () cond e1 e2) = do
+  mv <- fresh
+  cond' <- elaborateExpType cond
+  constrainType (ann cond') (TypeCon Type (TyCon "Bool"))
+  e1' <- elaborateExpType e1
+  e2' <- elaborateExpType e2
+  constrainType (ann e1') (TypeMetaVar (ann e2'))
+  constrainType mv (TypeMetaVar (ann e1'))
+  constrainType mv (TypeMetaVar (ann e2'))
+  pure (IfThenElse mv cond' e1' e2')
 
 elaborateLit :: Lit -> Infer MetaVar
 elaborateLit LitInt{} = do
@@ -1667,6 +1721,7 @@ instance Ann (Exp typ) where
   ann (Con x _ _)   = x
   ann (Wildcard x)  = x
   ann (TypeAnn _ x) = ann x
+  ann (IfThenElse x _ _ _) = x
 
 instance Ann Type where
   ann (TypeVar x _)   = x
