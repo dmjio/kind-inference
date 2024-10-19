@@ -36,7 +36,7 @@ data Decl kind typ
   | Foreign Name (Type kind)
   | TypeSig Name [Pred kind] (Type kind)
   | Fixity Fixity (Maybe Int) [Name]
-  | Declaration (Binding typ)
+  | Declaration typ [Binding typ]
   deriving (Show, Eq)
 
 data Fixity
@@ -107,7 +107,8 @@ instance GetName (Decl a typ) where
   getName (Foreign name _)         = name
   getName (TypeSig name _ _) = name
   getName (Fixity _ _ names)       = intercalate "," names
-  getName (Declaration binding)    = getName binding
+  getName (Declaration _ [])       = error "no bindings"
+  getName (Declaration _ (b:_))    = getName b
 
 instance GetName (Binding a) where
   getName (Binding _ name _ _) = name
@@ -277,7 +278,7 @@ instance Show Error where
     ]
   show (UnificationFailedType k1 k2) =
     intercalate "\n"
-    [ "Unification failed"
+    [ "Unification type failed"
     , "Type: " <> showType k1
     , "Type: " <> showType k2
     ]
@@ -410,7 +411,8 @@ showDecl (Foreign name typ) =
   , "::"
   , showType typ
   ]
-showDecl (Declaration binding) = showBinding binding
+showDecl (Declaration _ bindings) =
+  intercalate "\n" (showBinding <$> bindings)
 showDecl (Fixity fixity precedence names) =
   intercalate " "
   [ showFixity fixity <>
@@ -595,6 +597,7 @@ kindCheck k1 k2 =
 bail :: Error -> Infer a
 bail e = do
   dump "bailing out"
+  liftIO (print e)
   throwError e
 
 unifyType
@@ -610,6 +613,11 @@ unifyType (TypeCon k1 x) (TypeCon k2 y)
       kindCheck k1 k2
       pure Nothing
 unifyType (TypeMetaVar x) (TypeMetaVar y) | x == y = pure Nothing
+unifyType (TypeApp k1 x1 y1) (TypeApp k2 x2 y2) = do
+  kindCheck k1 k2
+  constrainTypes x1 x2
+  constrainTypes y1 y2
+  pure Nothing
 unifyType (TypeFun k1 x1 y1) (TypeFun k2 x2 y2) = do
   kindCheck k1 k2
   constrainTypes x1 x2
@@ -617,8 +625,7 @@ unifyType (TypeFun k1 x1 y1) (TypeFun k2 x2 y2) = do
   pure Nothing
 unifyType (TypeMetaVar x) y = metaVarBindType x y
 unifyType x (TypeMetaVar y) = metaVarBindType y x
-unifyType t1 t2 = do
-  dump "Failed"
+unifyType t1 t2 =
   bail (UnificationFailedType t1 t2)
 
 unify :: Kind -> Kind -> Infer (Maybe (MetaVar, Kind))
@@ -633,7 +640,6 @@ unify (KindFun x1 y1) (KindFun x2 y2) = do
 unify (KindMetaVar x) y = metaVarBind x y
 unify x (KindMetaVar y) = metaVarBind y x
 unify k1 k2 = do
-  dump "Failed"
   bail (UnificationFailed k1 k2)
 
 dump :: String -> Infer ()
@@ -845,9 +851,10 @@ substituteDeclTyped (TypeSig name args body) =
   pure (TypeSig name args body)
 substituteDeclTyped (Fixity fixity precedence names) =
   pure (Fixity fixity precedence names)
-substituteDeclTyped (Declaration binding) = do
-  b <- substituteBinding binding
-  pure (Declaration b)
+substituteDeclTyped (Declaration typ bindings) = do
+  t <- getType typ
+  bs <- traverse substituteBinding bindings
+  pure (Declaration t bs)
 
 substituteBinding :: Binding MetaVar -> Infer (Binding (Type Kind))
 substituteBinding (Binding mv name args body) = do
@@ -923,8 +930,8 @@ substituteDecl (TypeSig name ctx typ) = do
 substituteDecl (Foreign name typ) = do
   t <- substituteType typ
   pure (Foreign name t)
-substituteDecl (Declaration binding) =
-  pure (Declaration binding)
+substituteDecl (Declaration typ binding) =
+  pure (Declaration typ binding)
 substituteDecl (Fixity fixity precedence names) = do
   pure (Fixity fixity precedence names)
 
@@ -1005,16 +1012,21 @@ shouldDebug = True
 
 classT :: IO ()
 classT = testInferType
-  [ Declaration $ Binding () "ten" [] $ Lit () (LitInt 10)
+  [ Declaration () [ Binding () "ten" [] $ Lit () (LitInt 10) ]
   ]
 
 -- | Constructor patterns
 isJustP :: IO ()
 isJustP = testInferType
   [ maybeDT
-  , Declaration $
-      Binding () "isJust"
-        [ Con () "Nothing" [] ] $ Lit () (LitBool True)
+  , Declaration ()
+      [ Binding () "isJust"
+          [ Con () "Nothing" []
+          ] $ Lit () (LitBool True)
+      , Binding () "isJust"
+          [ Con () "Just" [ Var () "x" ]
+          ] $ Lit () (LitBool True)
+      ]
   ]
 
 tt :: IO ()
@@ -1044,7 +1056,7 @@ tt = testInferType
 
     appE   = App ()
     b      = Binding ()
-    dec    = Declaration
+    dec    = Declaration () . pure
     v      = Var ()
     lint   = Lit () . LitInt
     char   = Lit () . LitChar
@@ -1064,12 +1076,13 @@ testInferType decls = do
       dbg "\nInferred types..."
       forM_ ds $ \decl -> do
         case decl of
-          Declaration binding -> do
+          Declaration typ bindings -> do
             let
-              scheme = generalizeType (ann binding)
+              scheme = generalizeType typ
               name = getName decl
             dbg $ name <> " :: " <> showTypeScheme scheme
-            dbg $ showBinding binding
+            forM_ bindings $ \b ->
+              putStrLn (showBinding b)
             putStrLn ""
           _ -> pure ()
 
@@ -1103,7 +1116,6 @@ inferTypes decls = runInfer $ do
     dbg ("Inferring type for decl: " <> showDecl d)
     (maybeScheme, decl) <- inferType d
     mapM_ (addToTypeEnv decl) maybeScheme
-    dump "Done"
     -- decl <$ reset
     pure decl
 
@@ -1139,7 +1151,7 @@ addBindings :: [Decl Kind ()] -> Infer ()
 addBindings decls =
   forM_ decls $ \decl ->
     case decl of
-      Declaration (Binding () name _ _) ->
+      Declaration _ (Binding () name _ _ : _) ->
         void (addToEnv name)
       _ ->
         pure ()
@@ -1205,9 +1217,12 @@ mkTypeCon :: Kind -> Name -> [Type Kind] -> Type Kind
 mkTypeCon k n = foldl (TypeApp Type) (TypeCon k (TyCon n))
 
 elaborateDeclTyped :: Decl Kind () -> Infer (Decl Kind MetaVar)
-elaborateDeclTyped (Declaration binding) = do
-  b <- elaborateBinding binding
-  pure (Declaration b)
+elaborateDeclTyped (Declaration () bindings) = do
+  mv <- fresh
+  bs <- traverse elaborateBinding bindings
+  forM_ bs $ \b ->
+    constrainType mv (TypeMetaVar (ann b))
+  pure (Declaration mv bs)
 elaborateDeclTyped (Data kind name args vars) = do
   let con = mkTypeCon kind name args
   vs <- traverse (elaborateVariantType con) vars
@@ -1240,8 +1255,9 @@ elaborateBinding (Binding () name args body) = do
   _ <- fmap TypeMetaVar <$> populateEnv (S.toList fvs)
   args' <- traverse elaborateExp args
   body' <- elaborateExp body
-  constrainType mv
-    (foldr tFun (TypeMetaVar (ann body')) (fmap (TypeMetaVar . ann) args'))
+  constrainType mv $
+    foldr tFun (TypeMetaVar (ann body'))
+    (TypeMetaVar . ann <$> args')
   pure (Binding mv name args' body')
 
 tFun :: Type Kind -> Type Kind -> Type Kind
@@ -1281,10 +1297,9 @@ elaborateExp (Con () name args) = do
   mv <- fresh
   con <- lookupNamedType name
   args' <- traverse elaborateExp args
-  constrainType mv
-    (foldr
-       (TypeApp Type)
-       (TypeMetaVar con)
+  constrainType con
+    (foldr tFun
+       (TypeMetaVar mv)
        (TypeMetaVar . ann <$> args'))
   pure (Con mv name args')
 
@@ -1379,8 +1394,8 @@ elaborate (Foreign name typ) = do
   t <- elaborateType typ
   constrain (ann t) Type
   pure (Foreign name t)
-elaborate (Declaration binding) =
-  pure (Declaration binding)
+elaborate (Declaration () binding) =
+  pure (Declaration () binding)
 elaborate (Fixity fixity precedence names) =
   pure (Fixity fixity precedence names)
 
@@ -1481,8 +1496,8 @@ lookupNamedType named = do
   case M.lookup name typEnv of
     Just scheme -> do
       mv <- fresh
-      kind <- instantiateType name scheme
-      constrainType mv kind
+      typ <- instantiateType name scheme
+      constrainType mv typ
       pure mv
     Nothing -> do
       env <- gets env
@@ -1561,7 +1576,7 @@ annKind (KindSignature _ k)     = k
 annKind (TypeSig _ _ _)   = Type
 annKind (Instance _ _)          = Constraint
 annKind (Foreign _ _)           = Type
-annKind (Declaration _)         = Type
+annKind (Declaration _ _)       = Type
 annKind (Fixity _ _ _)          = error "no kind for fixity declaration"
 
 constrainType :: MetaVar -> Type Kind -> Infer ()
@@ -1585,7 +1600,7 @@ constrainKinds k1 k2 = do
       }
 
 generalizeDeclType :: Decl Kind (Type Kind) -> Maybe TypeScheme
-generalizeDeclType (Declaration (Binding t _ _ _)) = Just (generalizeType t)
+generalizeDeclType (Declaration t _) = Just (generalizeType t)
 generalizeDeclType _ = Nothing
 
 generalizeBinding :: Binding (Type Kind) -> TypeScheme
