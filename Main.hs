@@ -32,11 +32,11 @@ data Decl kind typ
   | Class kind Name [Type kind] [Method kind]
   | Instance [Pred kind] (Pred kind)
   | Newtype kind Name [Type kind] (Variant kind typ)
-  | KindSignature Name Kind
+  | KindSig Name Kind
   | Foreign Name (Type kind)
   | TypeSig Name [Pred kind] (Type kind)
   | Fixity Fixity (Maybe Int) [Name]
-  | Declaration typ [Binding kind typ]
+  | Decl typ [Binding kind typ]
   deriving (Show, Eq)
 
 data Fixity
@@ -73,6 +73,7 @@ data Exp kind typ
   -- Patterns
   | As typ Name (Pat kind typ)
   | Con typ Name [Pat kind typ]
+  | Let typ [Decl kind typ] (Exp kind typ)
   | Wildcard typ
   | IfThenElse typ (Exp kind typ) (Exp kind typ) (Exp kind typ)
   -- Others
@@ -106,13 +107,13 @@ instance GetName (Decl a typ) where
   getName (TypeSyn _ name _ _)     = name
   getName (Class _ name _ _)       = name
   getName (Newtype _ name _ _)     = name
-  getName (KindSignature name _)   = name
+  getName (KindSig name _)   = name
   getName (Instance _ p)           = getName p
   getName (Foreign name _)         = name
   getName (TypeSig name _ _) = name
   getName (Fixity _ _ names)       = intercalate "," names
-  getName (Declaration _ [])       = error "no bindings"
-  getName (Declaration _ (b:_))    = getName b
+  getName (Decl _ [])       = error "no bindings"
+  getName (Decl _ (b:_))    = getName b
 
 instance GetName (Binding kind a) where
   getName (Binding _ name _ _) = name
@@ -267,6 +268,7 @@ data Error
   | OccursCheckFailed MetaVar Kind
   | OccursCheckFailedType MetaVar (Type Kind)
   | Doesn'tOccurInInstanceHead Name (Pred ()) (Pred ())
+  | CouldntFindSubstitution Name MetaVar
 
 fresh :: Infer MetaVar
 fresh = do
@@ -313,6 +315,10 @@ instance Show Error where
     , "Variable: " <> name
     , "Head: " <> showPred superPred
     , "Context: " <> showPred p
+    ]
+  show (CouldntFindSubstitution name mv) =
+    intercalate "\n"
+    [ "Couldn't find " <> name <> " in substitution " <> show mv
     ]
 
 class ShowAnn a where
@@ -388,7 +394,7 @@ showDecl (Newtype a n vars variant) =
       else intercalate " " (showTypeVar <$> vars) <> " ="
   , showVariant variant
   ]
-showDecl (KindSignature name kind) =
+showDecl (KindSig name kind) =
   intercalate " "
   [ "type"
   , name
@@ -415,7 +421,7 @@ showDecl (Foreign name typ) =
   , "::"
   , showType typ
   ]
-showDecl (Declaration _ bindings) =
+showDecl (Decl _ bindings) =
   intercalate "\n" (showBinding <$> bindings)
 showDecl (Fixity fixity precedence names) =
   intercalate " "
@@ -448,6 +454,16 @@ showExpVar :: (ShowAnn kind, ShowAnn typ) => Exp kind typ -> String
 showExpVar (Var _ name) = name
 showExpVar (Lit _ lit) = showLit lit
 showExpVar (Wildcard _) = "_"
+showExpVar (Let _ decls e) =
+  intercalate " "
+  [ "let {"
+  , intercalate "; "
+    [ showDecl decl
+    | decl <- decls
+    ]
+  , "} in " <> showExp e
+  ]
+
 showExpVar (IfThenElse t c e1 e2) =
   intercalate " "
   [ "if"
@@ -766,8 +782,34 @@ instance Substitution a => Substitution [a] where
   freeVars = S.unions . fmap freeVars
   metaVars = S.unions . fmap metaVars
 
+instance Substitution (Decl kind typ) where
+  -- | Data kind Name [Type kind] [Variant kind typ]
+  -- | TypeSyn kind Name [Type kind] (Type kind)
+  -- | Class kind Name [Type kind] [Method kind]
+  -- | Instance [Pred kind] (Pred kind)
+  -- | Newtype kind Name [Type kind] (Variant kind typ)
+  -- | KindSig Name Kind
+  -- | Foreign Name (Type kind)
+  -- | TypeSig Name [Pred kind] (Type kind)
+  -- | Fixity Fixity (Maybe Int) [Name]
+  freeVars (Decl _ bindings) =
+    freeVars bindings
+  freeVars _ = mempty
+
+  metaVars (Decl _ bindings) =
+    metaVars bindings
+  metaVars _ = mempty
+
+instance Substitution (Binding kind typ) where
+  metaVars (Binding _ _ args e) =
+    metaVars e `S.union` metaVars args
+  freeVars (Binding _ _ args e) =
+    freeVars e `S.difference` freeVars args
+
 instance Substitution (Exp kind a) where
   metaVars _ = mempty
+  freeVars (Let _ decs e)    =
+    freeVars e `S.difference` S.fromList (getName <$> decs)
 
   freeVars (Var _ x)         = S.singleton x
   freeVars (App _ f x)       = freeVars f `S.union` freeVars x
@@ -779,7 +821,7 @@ instance Substitution (Exp kind a) where
     freeVars cond <> freeVars e1 <> freeVars e2
 
   -- NOTE: since this is used when elaborating binding args
-  -- we only return the name
+  -- we only return the name. TODO: make patterns its own data type
   freeVars (As _ name _)   = S.singleton name
 
   freeVars (Con _ _ args)   = freeVars args
@@ -865,18 +907,18 @@ substituteDeclTyped (Instance supers ctx) =
 substituteDeclTyped (Newtype kind name args var) = do
   v <- substituteVariantTyped var
   pure (Newtype kind name args v)
-substituteDeclTyped (KindSignature name sig) =
-  pure (KindSignature name sig)
+substituteDeclTyped (KindSig name sig) =
+  pure (KindSig name sig)
 substituteDeclTyped (Foreign name typ) =
   pure (Foreign name typ)
 substituteDeclTyped (TypeSig name args body) =
   pure (TypeSig name args body)
 substituteDeclTyped (Fixity fixity precedence names) =
   pure (Fixity fixity precedence names)
-substituteDeclTyped (Declaration typ bindings) = do
+substituteDeclTyped (Decl typ bindings) = do
   t <- getType typ
   bs <- traverse substituteBindingType bindings
-  pure (Declaration t bs)
+  pure (Decl t bs)
 
 substituteBindingType
   :: Binding Kind MetaVar -> Infer (Binding Kind (Type Kind))
@@ -923,6 +965,11 @@ substituteExpType (IfThenElse mv cond e1 e2) = do
   e1' <- substituteExpType e1
   e2' <- substituteExpType e2
   pure (IfThenElse typ cond' e1' e2')
+substituteExpType (Let t decs e) = do
+  typ <- getType t
+  decs' <- traverse substituteDeclTyped decs
+  e' <- substituteExpType e
+  pure (Let typ decs' e')
 
 substitute
   :: Decl MetaVar ()
@@ -952,8 +999,8 @@ substituteDecl (Newtype mv name vars variant) = do
   substitutedKind <- getKind mv
   substitutedVariant <- substituteVariant variant
   pure (Newtype substitutedKind name vs substitutedVariant)
-substituteDecl (KindSignature name kind) =
-  pure (KindSignature name kind)
+substituteDecl (KindSig name kind) =
+  pure (KindSig name kind)
 substituteDecl (Instance supers context) = do
   supers_ <- traverse substitutePred supers
   ctx_ <- substitutePred context
@@ -965,9 +1012,9 @@ substituteDecl (TypeSig name ctx typ) = do
 substituteDecl (Foreign name typ) = do
   t <- substituteType typ
   pure (Foreign name t)
-substituteDecl (Declaration typ bindings) = do
+substituteDecl (Decl typ bindings) = do
   b <- traverse substituteBinding bindings
-  pure (Declaration typ b)
+  pure (Decl typ b)
 substituteDecl (Fixity fixity precedence names) = do
   pure (Fixity fixity precedence names)
 
@@ -1007,6 +1054,10 @@ substituteExp (IfThenElse () cond e1 e2) = do
   e1' <- substituteExp e1
   e2' <- substituteExp e2
   pure (IfThenElse () cond' e1' e2')
+substituteExp (Let () decs e) = do
+  decs' <- traverse substituteDecl decs
+  e' <- substituteExp e
+  pure (Let () decs' e')
 
 substitutePred
   :: Pred MetaVar
@@ -1083,16 +1134,37 @@ dbg s = when shouldDebug $ liftIO (putStrLn s)
 shouldDebug :: Bool
 shouldDebug = True
 
+letinex :: IO ()
+letinex = testInferType
+  [ Decl () [ Binding () "foo" [] letin ]
+  ] where
+      letin =
+        Let () [ Decl () [ Binding () "id" [ Var () "x" ] (Var () "x") ]
+               , fixf
+               ] (App () (Var () "id") (Lit () (LitInt 1)))
+
+fixf :: Decl Kind ()
+fixf =
+  Decl () [ bb
+          ]
+
+bb :: Binding Kind ()
+bb = Binding () "fix" [ Var () "f" ] (App () (Var () "f") ((App () (Var () "fix")) (Var () "f")))
+
+appp :: Exp Kind ()
+appp = (App () (Var () "f") ((App () (Var () "fix")) (Var () "f")))
+
+
 classT :: IO ()
 classT = testInferType
-  [ Declaration () [ Binding () "ten" [] $ Lit () (LitInt 10) ]
+  [ Decl () [ Binding () "ten" [] $ Lit () (LitInt 10) ]
   ]
 
 -- | Constructor patterns
 isJustWildTypeAnn :: IO ()
 isJustWildTypeAnn = testInferType
   [ maybeDT
-  , Declaration ()
+  , Decl ()
       [ Binding () "isJust"
           [ Con () "Nothing" []
           ] $ Lit () (LitBool False)
@@ -1104,7 +1176,7 @@ isJustWildTypeAnn = testInferType
 
 ifThenElseEx :: IO ()
 ifThenElseEx = testInferType
-  [ Declaration ()
+  [ Decl ()
       [ Binding () "foo"
           [ Var () "x"
           ]
@@ -1117,7 +1189,7 @@ ifThenElseEx = testInferType
 
 idstr :: IO ()
 idstr = testInferType
-  [ Declaration ()
+  [ Decl ()
       [ Binding () "id"
           [ TypeAnn tString (Var () "x")
           ]
@@ -1127,7 +1199,7 @@ idstr = testInferType
 
 constDecStr :: IO ()
 constDecStr = testInferType
-  [ Declaration ()
+  [ Decl ()
       [ Binding () "const"
           [ Var () "x"
           , TypeAnn tString (Wildcard ())
@@ -1166,7 +1238,7 @@ tt = testInferType
 
     appE   = App ()
     b      = Binding ()
-    dec    = Declaration () . pure
+    dec    = Decl () . pure
     v      = Var ()
     lint   = Lit () . LitInt
     char   = Lit () . LitChar
@@ -1177,7 +1249,7 @@ tt = testInferType
 
 testInferType :: [Decl Kind ()] -> IO ()
 testInferType decls = do
-  dbg "Declarations..."
+  dbg "Decls..."
   dbg $ intercalate "\n" (showDecl <$> decls)
   result <- inferTypes decls
   case result of
@@ -1186,7 +1258,7 @@ testInferType decls = do
       dbg "\nInferred types..."
       forM_ ds $ \decl -> do
         case decl of
-          Declaration typ bindings -> do
+          Decl typ bindings -> do
             let
               scheme = generalizeType typ
               name = getName decl
@@ -1224,12 +1296,15 @@ inferTypes decls = runInfer $ do
   addTypeSigs decls
   addBindings decls
   addConstructors decls
-  forM decls $ \d -> do
-    dbg ("Inferring type for decl: " <> showDecl d)
-    (maybeScheme, decl) <- inferType d
-    mapM_ (addToTypeEnv decl) maybeScheme
-    -- decl <$ reset
-    pure decl
+  xs <-
+    forM decls $ \d -> do
+      dbg ("Inferring type for decl: " <> showDecl d)
+      (maybeScheme, decl) <- inferType d
+      mapM_ (addToTypeEnv decl) maybeScheme
+      -- decl <$ reset
+      pure decl
+  dump "done"
+  pure xs
 
 reset :: Infer ()
 reset =
@@ -1241,15 +1316,15 @@ reset =
 
 inferKinds :: [Decl () ()] -> IO (Either Error [Decl Kind ()])
 inferKinds decls = runInfer $ do
-  addKindSignatures decls
+  addKindSigs decls
   forM decls $ \d -> do
     (scheme, decl) <- inferKind d
     addToKindEnv decl scheme
     decl <$ reset
 
-addKindSignatures :: [Decl a ()] -> Infer ()
-addKindSignatures decls = do
-  let sigs = [ (name, generalize k) | KindSignature name k <- decls ]
+addKindSigs :: [Decl a ()] -> Infer ()
+addKindSigs decls = do
+  let sigs = [ (name, generalize k) | KindSig name k <- decls ]
   mapM_ (uncurry addToKindEnv) sigs
 
 addTypeSigs :: [Decl Kind ()] -> Infer ()
@@ -1263,7 +1338,7 @@ addBindings :: [Decl Kind ()] -> Infer ()
 addBindings decls =
   forM_ decls $ \decl ->
     case decl of
-      Declaration _ (Binding () name _ _ : _) ->
+      Decl _ (Binding () name _ _ : _) ->
         void (addToEnv name)
       _ ->
         pure ()
@@ -1288,8 +1363,12 @@ inferKind decl = do
   d <- substitute elaborated
   pure (generalize (annKind d), d)
 
-populateEnv :: GetName name => [name] -> Infer [MetaVar]
-populateEnv = mapM (addToEnv . getName)
+populateEnv :: GetName name => [name] -> Infer ([Name], [MetaVar])
+populateEnv decs = fmap unzip $ do
+  forM decs $ \d -> do
+    let name = getName d
+    mv <- addToEnv name
+    pure (name, mv)
 
 inferType :: Decl Kind () -> Infer (Maybe TypeScheme, Decl Kind (Type Kind))
 inferType decl = do
@@ -1329,12 +1408,12 @@ mkTypeCon :: Kind -> Name -> [Type Kind] -> Type Kind
 mkTypeCon k n = foldl (TypeApp Type) (TypeCon k (TyCon n))
 
 elaborateDeclTyped :: Decl Kind () -> Infer (Decl Kind MetaVar)
-elaborateDeclTyped (Declaration () bindings) = do
+elaborateDeclTyped (Decl () bindings) = do
   mv <- fresh
   bs <- traverse elaborateBindingType bindings
   forM_ bs $ \b ->
     constrainType mv (TypeMetaVar (ann b))
-  pure (Declaration mv bs)
+  pure (Decl mv bs)
 elaborateDeclTyped (Data kind name args vars) = do
   let con = mkTypeCon kind name args
   vs <- traverse (elaborateVariantType con) vars
@@ -1349,8 +1428,8 @@ elaborateDeclTyped (Newtype kind name args var) = do
   let con = mkTypeCon kind name args
   v <- elaborateVariantType con var
   pure (Newtype kind name args v)
-elaborateDeclTyped (KindSignature name sig) =
-  pure (KindSignature name sig)
+elaborateDeclTyped (KindSig name sig) =
+  pure (KindSig name sig)
 elaborateDeclTyped (Foreign name typ) =
   pure (Foreign name typ)
 elaborateDeclTyped (TypeSig name args body) =
@@ -1364,7 +1443,7 @@ elaborateBindingType (Binding () name args body) = do
   -- e.g. foo x@(Just x) = undefined
   mv <- lookupNamedType name
   let fvs = S.unions (freeVars <$> args)
-  _ <- fmap TypeMetaVar <$> populateEnv (S.toList fvs)
+  void $ populateEnv (S.toList fvs)
   args' <- traverse elaborateExpType args
   body' <- elaborateExpType body
   constrainType mv $
@@ -1404,6 +1483,10 @@ elaborateExp (IfThenElse () cond e1 e2) = do
   e1' <- elaborateExp e1
   e2' <- elaborateExp e2
   pure (IfThenElse () c e1' e2')
+elaborateExp (Let () decs e) = do
+  decs' <- traverse elaborateDecl decs
+  e' <- elaborateExp e
+  pure (Let () decs' e')
 
 tFun :: Type Kind -> Type Kind -> Type Kind
 tFun = TypeFun Type
@@ -1464,6 +1547,24 @@ elaborateExpType (IfThenElse () cond e1 e2) = do
   constrainType mv (TypeMetaVar (ann e1'))
   constrainType mv (TypeMetaVar (ann e2'))
   pure (IfThenElse mv cond' e1' e2')
+elaborateExpType (Let () decs e) = do
+  mv <- fresh
+  vars <- uncurry zip <$> populateEnv decs
+  decs' <- traverse elaborateDeclTyped decs
+  generalizeLet vars
+  e' <- elaborateExpType e
+  constrainType mv (TypeMetaVar (ann e'))
+  pure (Let mv decs' e')
+
+generalizeLet :: [(Name, MetaVar)] -> Infer ()
+generalizeLet vars = do
+  dbg "Generalizing Let"
+  solve -- this will force any type errors
+  typeSubs <- gets typeSubstitutions
+  forM_ vars $ \(name, mv) ->
+     case M.lookup mv typeSubs of
+       Nothing -> throwError (CouldntFindSubstitution name mv)
+       Just t -> addToTypeEnv name (generalizeType t)
 
 elaborateLit :: Lit -> Infer MetaVar
 elaborateLit LitInt{} = do
@@ -1492,52 +1593,53 @@ elaborateDecl decl = do
   dbg "Elaborating..."
   elaborate decl
 
-handleKindSignature
+handleKindSig
   :: Name
   -> MetaVar
   -> Infer ()
-handleKindSignature name mv = do
+handleKindSig name mv = do
   result <- lookupKindEnv name
   forM_ result (constrain mv . KindMetaVar)
 
 elaborate :: Decl () () -> Infer (Decl MetaVar ())
 elaborate (TypeSyn () name vars typ) = do
   mv <- addToEnv name
-  handleKindSignature name mv
-  mvs <- fmap KindMetaVar <$> populateEnv vars
+  handleKindSig name mv
+  (_, ms) <- populateEnv vars
+  let mvs = fmap KindMetaVar ms
   vs <- traverse elaborateType vars
   t <- elaborateType typ
   constrain mv (foldr KindFun (KindMetaVar (ann t)) mvs)
   pure (TypeSyn mv name vs t)
 elaborate (Data () name vars variants) = do
   mv <- addToEnv name
-  handleKindSignature name mv
-  mvs <- fmap KindMetaVar <$> populateEnv (getName <$> vars)
+  handleKindSig name mv
+  (_, mvs) <- fmap (fmap KindMetaVar) <$> populateEnv (getName <$> vars)
   vars' <- traverse elaborateType vars
   vs <- traverse elaborateVariant variants
   constrain mv (foldr KindFun Type mvs)
   pure (Data mv name vars' vs)
 elaborate (Newtype () name vars variant) = do
   mv <- addToEnv name
-  handleKindSignature name mv
-  mvs <- fmap KindMetaVar <$> populateEnv (getName <$> vars)
+  handleKindSig name mv
+  (_, mvs) <- fmap (fmap KindMetaVar) <$> populateEnv (getName <$> vars)
   vars' <- traverse elaborateType vars
   v <- elaborateVariant variant
   constrain mv (foldr KindFun Type mvs)
   pure (Newtype mv name vars' v)
 elaborate (Class () name vars methods) = do
   mv <- addToEnv name
-  handleKindSignature name mv
+  handleKindSig name mv
   void $ populateEnv (getFreeVars vars methods)
   vs <- traverse elaborateType vars
   methods_ <- traverse elaborateMethod methods
   mvs <- fmap KindMetaVar <$> traverse lookupName vars
   constrain mv (foldr KindFun Constraint mvs)
   pure (Class mv name vs methods_)
-elaborate (KindSignature name kind) = do
+elaborate (KindSig name kind) = do
   mv <- addToEnv name
   constrain mv kind
-  pure (KindSignature name kind)
+  pure (KindSig name kind)
 elaborate (Instance supers ctx) = do
   checkInstanceHead supers ctx
   addContextToEnv supers
@@ -1556,9 +1658,9 @@ elaborate (Foreign name typ) = do
   t <- elaborateType typ
   constrain (ann t) Type
   pure (Foreign name t)
-elaborate (Declaration () bindings) = do
+elaborate (Decl () bindings) = do
   bs <- traverse elaborateBinding bindings
-  pure (Declaration () bs)
+  pure (Decl () bs)
 elaborate (Fixity fixity precedence names) =
   pure (Fixity fixity precedence names)
 
@@ -1677,8 +1779,8 @@ lookupNamedType named = do
         Just v -> pure v
 
 instantiate :: Name -> Scheme -> Infer Kind
-instantiate name (Scheme vars kind) = do
-  dbg $ "Instantiating Type: " <> name <> " :: " <> showKind kind
+instantiate name s@(Scheme vars kind) = do
+  dbg $ "Instantiating Kind: " <> name <> " :: " <> showScheme s
   mvs <- replicateM (length vars) fresh
   let mapping = M.fromList (zip vars mvs)
   pure (cataKind (replaceKind mapping) kind)
@@ -1691,8 +1793,8 @@ instantiate name (Scheme vars kind) = do
       replaceKind _ k = k
 
 instantiateType :: Name -> TypeScheme -> Infer (Type Kind)
-instantiateType name (TypeScheme vars typ) = do
-  dbg $ "Instantiating Type: " <> name <> " :: " <> showType typ
+instantiateType name s@(TypeScheme vars typ) = do
+  dbg $ "Instantiating Type: " <> name <> " :: " <> showTypeScheme s
   mvs <- replicateM (length vars) fresh
   let mapping = M.fromList (zip vars mvs)
   pure (cataType (replaceType mapping) typ)
@@ -1720,15 +1822,16 @@ cataKind f (KindScheme (Scheme xs k)) =
 class Ann a where
   ann :: a ann -> ann
 
-instance Ann (Exp typ) where
-  ann (Var x _)     = x
-  ann (Lit x _)     = x
-  ann (App x _ _)   = x
-  ann (Lam x _ _)   = x
-  ann (As x _ _)    = x
-  ann (Con x _ _)   = x
-  ann (Wildcard x)  = x
-  ann (TypeAnn _ x) = ann x
+instance Ann (Exp kind) where
+  ann (Var x _)            = x
+  ann (Lit x _)            = x
+  ann (App x _ _)          = x
+  ann (Lam x _ _)          = x
+  ann (As x _ _)           = x
+  ann (Con x _ _)          = x
+  ann (Wildcard x)         = x
+  ann (TypeAnn _ x)        = ann x
+  ann (Let x _ _)          = x
   ann (IfThenElse x _ _ _) = x
 
 instance Ann Type where
@@ -1746,11 +1849,11 @@ annKind (Data x _ _ _)          = x
 annKind (TypeSyn x _ _ _)       = x
 annKind (Class x _ _ _)         = x
 annKind (Newtype x _ _ _)       = x
-annKind (KindSignature _ k)     = k
-annKind (TypeSig _ _ _)   = Type
+annKind (KindSig _ k)     = k
+annKind (TypeSig _ _ _)         = Type
 annKind (Instance _ _)          = Constraint
 annKind (Foreign _ _)           = Type
-annKind (Declaration _ _)       = Type
+annKind (Decl _ _)       = Type
 annKind (Fixity _ _ _)          = error "no kind for fixity declaration"
 
 constrainType :: MetaVar -> Type Kind -> Infer ()
@@ -1774,52 +1877,61 @@ constrainKinds k1 k2 = do
       }
 
 generalizeDeclType :: Decl Kind (Type Kind) -> Maybe TypeScheme
-generalizeDeclType (Declaration t _) = Just (generalizeType t)
+generalizeDeclType (Decl t _) = Just (generalizeType t)
 generalizeDeclType _ = Nothing
 
 generalizeBinding :: Binding Kind (Type Kind) -> TypeScheme
 generalizeBinding = generalizeType . ann
 
 generalizeType :: Type Kind -> TypeScheme
-generalizeType typ = TypeScheme vars (cataType quantify typ)
+generalizeType typ = TypeScheme vars type'
   where
     metavars = S.toList (metaVars typ)
     mapping  = zip (sort metavars) [0..]
     subs     = M.fromList mapping
-    vars     = S.toList (freeVars typ)
+    oldVars  = S.toList (freeVars typ)
+    vars     = S.toList (freeVars type')
+    type'    = cataType quantify typ
 
     quantify (TypeMetaVar m) = TypeVar Type (TyVar (showT (subs M.! m)))
     quantify k               = k
 
     showT :: Int -> String
-    showT k = combos !! k
+    showT = (combos !!)
 
     combos =
-      concat
-      [ pure <$> ['a'..'z']
-      , (\k v -> k : show v) <$> ['a' .. 'z'] <*> [ 1 .. 99 :: Int ]
+      [ k
+      | k <- concat
+             [ pure <$> ['a'..'z']
+             , (\k v -> k : show v) <$> ['a' .. 'z'] <*> [ 1 .. 99 :: Int ]
+             ]
+      ,  k `notElem` oldVars
       ]
 
 generalize :: Kind -> Scheme
-generalize kind = Scheme vars (cataKind quantify kind)
+generalize kind = Scheme vars kind'
   where
     metavars = S.toList (metaVars kind)
     mapping = zip (sort metavars) [ 0 :: Int .. ]
     subs = M.fromList mapping
-    vars = S.toList (freeVars kind)
+    oldVars = freeVars kind
 
-    quantify (KindMetaVar m) = KindVar (MkKindVar (showKind_ (subs M.! m)))
+    kind' = cataKind quantify kind
+    vars = S.toList (freeVars kind')
+
+    quantify (KindMetaVar m) = KindVar (MkKindVar (combos !! (subs M.! m)))
     quantify k               = k
 
-    showKind_ 0 = "k"
-    showKind_ n = "k" <> show n
+    combos =
+      filter (`notElem` oldVars)
+        ( "k" : zipWith (++) (repeat "k") (map show [1 :: Int ..]) )
 
 kk :: String
 kk = showDecl @() @() $ Fixity Infixr (Just 1) [ "---->" ]
 
 testInfer :: [Decl () ()] -> IO ()
 testInfer decs = do
-  dbg "Declarations..."
+  dbg "Decls..."
   dbg $ intercalate "\n" (showDecl <$> decs)
   result <- inferKinds decs
   case result of
@@ -1954,14 +2066,14 @@ recfail = Data () "Rec" [ tVar "f", tVar "a" ]
 okFailTest :: IO ()
 okFailTest
   = testInfer
-  [ KindSignature "OK" (Type --> Type)
+  [ KindSig "OK" (Type --> Type)
   , TypeSyn () "OK" [] (tCon "Int")
   ]
 
 okTest :: IO ()
 okTest
   = testInfer
-  [ KindSignature "OK" Type
+  [ KindSig "OK" Type
   , TypeSyn () "OK" [] (tCon "Int")
   ]
 
