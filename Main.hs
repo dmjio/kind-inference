@@ -27,11 +27,11 @@ showMetaVar :: MetaVar -> String
 showMetaVar mv = showKind (KindMetaVar mv)
 
 data Decl kind typ
-  = Data kind Name [Type kind] [Variant kind typ]
+  = Data kind Name [Type kind] [ConDecl kind typ]
   | TypeSyn kind Name [Type kind] (Type kind)
   | Class kind [Pred kind] (Pred kind) [Decl kind typ]
   | Instance [Pred kind] (Pred kind) [Decl kind typ]
-  | Newtype kind Name [Type kind] (Variant kind typ)
+  | Newtype kind Name [Type kind] (ConDecl kind typ)
   | KindSig Name Kind
   | Foreign Name (Type kind)
   | TypeSig Name [Pred kind] (Type kind)
@@ -138,8 +138,9 @@ instance GetName TyVar where
 instance GetName TyCon where
   getName (TyCon n) = n
 
-data Variant kind typ
-  = Variant Name [Type kind] typ
+data ConDecl kind typ
+  = ConDecl Name [Type kind] typ
+  | ConDeclRec Name [(Name, Type kind)] typ
   deriving (Show, Eq)
 
 data Type k
@@ -364,10 +365,10 @@ showDecl (Data a n vars xs) =
       [] -> ""
       y : ys ->
         concat
-        [ "\n  = " <> showVariant y
+        [ "\n  = " <> showConDecl y
         , concat
           [ "\n  | " <> v
-          | v <- fmap showVariant ys
+          | v <- fmap showConDecl ys
           ]
         ]
   ]
@@ -404,7 +405,7 @@ showDecl (Newtype a n vars variant) =
   , if null vars
       then "="
       else intercalate " " (showTypeVar <$> vars) <> " ="
-  , showVariant variant
+  , showConDecl variant
   ]
 showDecl (KindSig name kind) =
   intercalate " "
@@ -553,16 +554,29 @@ showPred (Pred name typ) =
   , showType typ
   ]
 
-showVariant
+showRecField :: ShowAnn ann => (Name, Type ann) -> String
+showRecField (n,t) =
+  intercalate " "
+  [ n
+  , "::"
+  , showType t
+  ]
+
+showConDecl
   :: (ShowAnn typ, ShowAnn ann)
-  => Variant ann typ
+  => ConDecl ann typ
   -> String
-showVariant (Variant n [] t) =
+showConDecl (ConDeclRec n fields t) =
+  intercalate " "
+  [ n
+  , braces (intercalate "," (showRecField <$> fields))
+  ] <> showAnn t
+showConDecl (ConDecl n [] t) =
   concat $ n :
   [ " :: " <> showAnn t
   | not $ null (showAnn t)
   ]
-showVariant (Variant n ts t) =
+showConDecl (ConDecl n ts t) =
   mconcat $
   [ intercalate " " (n : fmap showTypeVar ts)
   ] ++
@@ -806,13 +820,21 @@ instance Substitution a => Substitution [a] where
   freeVars = S.unions . fmap freeVars
   metaVars = S.unions . fmap metaVars
 
-instance Substitution t => Substitution (Variant kind t) where
-  freeVars (Variant _ typs typ) =
+instance Substitution t => Substitution (ConDecl kind t) where
+  freeVars (ConDeclRec _ fields typ) =
+    freeVars (snd <$> fields) `S.union`
+      freeVars typ
+
+  freeVars (ConDecl _ typs typ) =
     freeVars typs `S.union`
       freeVars typ
 
-  metaVars (Variant _ typs typ) =
+  metaVars (ConDecl _ typs typ) =
     metaVars typs `S.union`
+      metaVars typ
+
+  metaVars (ConDeclRec _ fields typ) =
+    metaVars (snd <$> fields) `S.union`
       metaVars typ
 
 instance Substitution () where
@@ -946,18 +968,20 @@ substituteTyped decl = do
   dbg "Substituting Type..."
   substituteDeclTyped decl
 
-substituteVariantTyped
-  :: Variant Kind MetaVar
-  -> Infer (Variant Kind (Type Kind))
-substituteVariantTyped (Variant k typs typ)  = do
+substituteConDeclTyped
+  :: ConDecl Kind MetaVar
+  -> Infer (ConDecl Kind (Type Kind))
+substituteConDeclTyped (ConDecl k typs typ)  = do
   t <- getType typ
-  pure (Variant k typs t)
-
+  pure (ConDecl k typs t)
+substituteConDeclTyped (ConDeclRec n fields ty)  = do
+  t <- getType ty
+  pure (ConDeclRec n fields t)
 substituteDeclTyped
   :: Decl Kind MetaVar
   -> Infer (Decl Kind (Type Kind))
 substituteDeclTyped (Data k n args vars) = do
-  vs <- traverse substituteVariantTyped vars
+  vs <- traverse substituteConDeclTyped vars
   pure (Data k n args vs)
 substituteDeclTyped (TypeSyn kind n args body) =
   pure (TypeSyn kind n args body)
@@ -968,7 +992,7 @@ substituteDeclTyped (Instance supers ctx decls) = do
   ds <- traverse substituteDeclTyped decls
   pure (Instance supers ctx ds)
 substituteDeclTyped (Newtype kind name args var) = do
-  v <- substituteVariantTyped var
+  v <- substituteConDeclTyped var
   pure (Newtype kind name args v)
 substituteDeclTyped (KindSig name sig) =
   pure (KindSig name sig)
@@ -1071,13 +1095,13 @@ substituteDecl (TypeSyn mv name vars typ) = do
 substituteDecl (Data mv name vars variants) = do
   vs <- traverse substituteType vars
   substitutedKind <- getKind mv
-  substitutedVariants <- mapM substituteVariant variants
-  pure (Data substitutedKind name vs substitutedVariants)
+  substitutedConDecls <- mapM substituteConDecl variants
+  pure (Data substitutedKind name vs substitutedConDecls)
 substituteDecl (Newtype mv name vars variant) = do
   vs <- traverse substituteType vars
   substitutedKind <- getKind mv
-  substitutedVariant <- substituteVariant variant
-  pure (Newtype substitutedKind name vs substitutedVariant)
+  substitutedConDecl <- substituteConDecl variant
+  pure (Newtype substitutedKind name vs substitutedConDecl)
 substituteDecl (KindSig name kind) =
   pure (KindSig name kind)
 substituteDecl (Instance supers context decls) = do
@@ -1153,12 +1177,18 @@ substitutePred (Pred n typ) = do
   t <- substituteType typ
   pure (Pred n t)
 
-substituteVariant
-  :: Variant MetaVar ()
-  -> Infer (Variant Kind ())
-substituteVariant (Variant name types t) = do
+substituteConDecl
+  :: ConDecl MetaVar ()
+  -> Infer (ConDecl Kind ())
+substituteConDecl (ConDecl name types t) = do
   substituted <- traverse substituteType types
-  pure (Variant name substituted t)
+  pure (ConDecl name substituted t)
+substituteConDecl (ConDeclRec name fields t) = do
+  fields_ <-
+    forM fields $ \(n,t1) -> do
+      t2 <- substituteType t1
+      pure (n,t2)
+  pure (ConDeclRec name fields_ t)
 
 substituteType :: Type MetaVar -> Infer (Type Kind)
 substituteType (TypeCon mv tyCon) = do
@@ -1373,20 +1403,39 @@ testInferType decls = do
 
 -- TODO: instead of this, return [TypeScheme] from `inferType`
 -- so you can add all the variants to the typeEnv
-addConstructors
+addConstructorsAndFields
   :: [Decl Kind () ]
   -> Infer ()
-addConstructors decls = mapM_ go decls
+addConstructorsAndFields decls = mapM_ go decls
   where
     go (Data kind name args variants) = do
       let tcon = mkTypeCon kind name args
-      forM_ variants $ \(Variant varName varArgs _) -> do
-        let t = foldr (-->) tcon varArgs
-        addToTypeEnv varName (generalizeType t)
-    go (Newtype kind name args (Variant _ varArgs _)) = do
+      forM_ variants $ \con -> do
+        case con of
+          ConDecl varName varArgs _ -> do
+            let t = foldr (-->) tcon varArgs
+            addToTypeEnv varName (generalizeType t)
+          ConDeclRec varName fields _ -> do
+            -- adds the constructor (e.g. 'MkPerson' in 'data Person = MkPerson String')
+            let t = foldr (-->) tcon (fmap snd fields)
+            addToTypeEnv varName (generalizeType t)
+            -- add each member field as well
+            forM_ fields $ \(n, t1) -> do
+              let ty = tcon --> t1
+              addToTypeEnv n (generalizeType ty)
+    go (Newtype kind name args (ConDecl _ varArgs _)) = do
       let tcon = mkTypeCon kind name args
           t = foldr (-->) tcon varArgs
       addToTypeEnv name (generalizeType t)
+    go (Newtype kind name args (ConDeclRec varName fields _)) = do
+      let tcon = mkTypeCon kind name args
+      -- adds the constructor (e.g. 'MkPerson' in 'data Person = MkPerson String')
+      let t = foldr (-->) tcon (fmap snd fields)
+      addToTypeEnv varName (generalizeType t)
+      -- add each member field as well
+      forM_ fields $ \(n, t1) -> do
+        let ty = tcon --> t1
+        addToTypeEnv n (generalizeType ty)
     go _ = pure ()
 
 inferTypes
@@ -1395,7 +1444,7 @@ inferTypes
 inferTypes decls = runInfer $ do
   addTypeSigs decls
   addBindings decls
-  addConstructors decls
+  addConstructorsAndFields decls
   xs <-
     forM decls $ \d -> do
       dbg ("Inferring type for decl: " <> showDecl d)
@@ -1493,30 +1542,41 @@ modifyEnv f = modify $ \s -> s { env = f (env s) }
 -- foo x = x + 1
 -- bar foo = foo + 1
 -- -- ^ foo here will overwrite the top level binding in env, needs to be renamed
-elaborateVariantType
+elaborateConDeclType
   :: Type Kind
-  -> Variant Kind ()
-  -> Infer (Variant Kind MetaVar)
-elaborateVariantType t (Variant name typs ()) = do
+  -> ConDecl Kind ()
+  -> Infer (ConDecl Kind MetaVar)
+elaborateConDeclType t (ConDecl name typs ()) = do
   mv <- fresh
   constrainTypes
     (TypeMetaVar mv)
     (foldr (-->) t typs)
-  pure (Variant name typs mv)
+  pure (ConDecl name typs mv)
+elaborateConDeclType t (ConDeclRec name fields ()) = do
+  mv <- fresh
+  constrainTypes
+    (TypeMetaVar mv)
+    (foldr (-->) t (snd <$> fields))
+  pure (ConDeclRec name fields mv)
 
 mkTypeCon :: Kind -> Name -> [Type Kind] -> Type Kind
 mkTypeCon k n = foldl (TypeApp Type) (TypeCon k (TyCon n))
+
+constrainAll :: Ann f => MetaVar -> [f MetaVar] -> Infer ()
+constrainAll mv xs = sequence_
+  [ constrainType mv (TypeMetaVar (ann x))
+  | x <- xs
+  ]
 
 elaborateDeclTyped :: Decl Kind () -> Infer (Decl Kind MetaVar)
 elaborateDeclTyped (Decl () bindings) = do
   mv <- fresh
   bs <- traverse elaborateBindingType bindings
-  forM_ bs $ \b ->
-    constrainType mv (TypeMetaVar (ann b))
+  constrainAll mv bs
   pure (Decl mv bs)
 elaborateDeclTyped (Data kind name args vars) = do
   let con = mkTypeCon kind name args
-  vs <- traverse (elaborateVariantType con) vars
+  vs <- traverse (elaborateConDeclType con) vars
   pure (Data kind name args vs)
 elaborateDeclTyped (TypeSyn kind n args body) =
   pure (TypeSyn kind n args body)
@@ -1528,7 +1588,7 @@ elaborateDeclTyped (Instance supers ctx decls) = do
   pure (Instance supers ctx ds)
 elaborateDeclTyped (Newtype kind name args var) = do
   let con = mkTypeCon kind name args
-  v <- elaborateVariantType con var
+  v <- elaborateConDeclType con var
   pure (Newtype kind name args v)
 elaborateDeclTyped (KindSig name sig) =
   pure (KindSig name sig)
@@ -1742,7 +1802,7 @@ elaborate (Data () name vars variants) = do
   handleKindSig name mv
   (_, mvs) <- fmap (fmap KindMetaVar) <$> populateEnv (getName <$> vars)
   vars' <- traverse elaborateType vars
-  vs <- traverse elaborateVariant variants
+  vs <- traverse elaborateConDecl variants
   constrain mv (foldr (-->) Type mvs)
   pure (Data mv name vars' vs)
 elaborate (Newtype () name vars variant) = do
@@ -1750,7 +1810,7 @@ elaborate (Newtype () name vars variant) = do
   handleKindSig  name mv
   (_, mvs) <- fmap (fmap KindMetaVar) <$> populateEnv (getName <$> vars)
   vars' <- traverse elaborateType vars
-  v <- elaborateVariant variant
+  v <- elaborateConDecl variant
   constrain mv (foldr (-->) Type mvs)
   pure (Newtype mv name vars' v)
 elaborate (Class () supers p decls) = do
@@ -1819,12 +1879,18 @@ elaboratePred (Pred name typ) = do
   constrain class_ (KindMetaVar (ann type_) --> Constraint)
   pure (Pred name type_)
 
-elaborateVariant :: Variant () () -> Infer (Variant MetaVar ())
-elaborateVariant (Variant name types typ) = do
+elaborateConDecl :: ConDecl () () -> Infer (ConDecl MetaVar ())
+elaborateConDecl (ConDecl name types typ) = do
   ts <- traverse elaborateType types
   forM_ ts (\t -> constrain (ann t) Type)
-  pure (Variant name ts typ)
-
+  pure (ConDecl name ts typ)
+elaborateConDecl (ConDeclRec name fields typ) = do
+  fields_ <-
+    forM fields $ \(n,t1) -> do
+      t2 <- elaborateType t1
+      constrain (ann t2) Type
+      pure (n,t2)
+  pure (ConDeclRec name fields_ typ)
 elaborateType :: Type () -> Infer (Type MetaVar)
 elaborateType (TypeVar () tyVar) = do
   mv <- lookupName tyVar
@@ -2083,48 +2149,48 @@ main = testInfer
   ]
 
 int :: Decl () ()
-int = Data () "Int" [] [ Variant "Int" [] () ]
+int = Data () "Int" [] [ ConDecl "Int" [] () ]
 
 lol :: Decl () ()
 lol = Data () "LOL" [ tVar "a", tVar "b" ]
-  [ Variant "LOL"
+  [ ConDecl "LOL"
     [ app (app (tCon "Either") (tVar "a")) (tVar "b") ]
     ()
   ]
 
 maybeD :: Decl () ()
 maybeD = Data () "Maybe" [ tVar "a" ]
-  [ Variant "Just" [ tVar "a" ] ()
-  , Variant "Nothing" [] ()
+  [ ConDecl "Just" [ tVar "a" ] ()
+  , ConDecl "Nothing" [] ()
   ]
 
 maybeDT :: Decl Kind ()
 maybeDT = Data (Type --> Type) "Maybe" [ TypeVar Type (TyVar "a") ]
-  [ Variant "Just" [ TypeVar Type (TyVar "a") ] ()
-  , Variant "Nothing" [] ()
+  [ ConDecl "Just" [ TypeVar Type (TyVar "a") ] ()
+  , ConDecl "Nothing" [] ()
   ]
 
 person :: Decl () ()
 person = Data () "Person" []
-  [ Variant "Person" [ tCon "String", tCon "Int" ] ()
+  [ ConDecl "Person" [ tCon "String", tCon "Int" ] ()
   ]
 
 statet :: Decl () ()
 statet = TypeSyn () "Foo" [] (tCon "StateT")
 
 proxy :: Decl () ()
-proxy = Newtype () "Proxy" [ tVar "k" ] (Variant "Proxy" [] ())
+proxy = Newtype () "Proxy" [ tVar "k" ] (ConDecl "Proxy" [] ())
 
 tree :: Decl () ()
 tree = Data () "Tree" [ tVar "a" ]
-  [ Variant "Node" [ tVar "a", app (tCon "Tree") (tVar "a")
+  [ ConDecl "Node" [ tVar "a", app (tCon "Tree") (tVar "a")
                    , app (tCon "Tree") (tVar "a")
                    ] ()
   ]
 
 treefail :: Decl () ()
 treefail = Data () "Tree" [ tVar "a" ]
-  [ Variant "Node" [ tVar "a", tCon "Tree", tCon "Tree" ] ()
+  [ ConDecl "Node" [ tVar "a", tCon "Tree", tCon "Tree" ] ()
   ]
 
 state :: Decl () ()
@@ -2133,8 +2199,8 @@ state = TypeSyn () "State" [ tVar "s", tVar "a" ]
 
 thisthat :: Decl () ()
 thisthat = Data () "ThisThat" [ tVar "l", tVar "r" ]
-  [ Variant "This" [ tVar "l" ] ()
-  , Variant "That" [ tVar "r" ] ()
+  [ ConDecl "This" [ tVar "l" ] ()
+  , ConDecl "That" [ tVar "r" ] ()
   ]
 
 tConT :: String -> Type Kind
@@ -2164,7 +2230,7 @@ data Cofree f a = Cofree a (f (Cofree f a))
 
 cofree :: Decl () ()
 cofree = Data () "Cofree" [ tVar "f", tVar "a" ]
-  [ Variant "Cofree"
+  [ ConDecl "Cofree"
     [ tVar "a"
     , tVar "f" `app` (tCon "Cofree" `app` tVar "f" `app` tVar "a")
     ] ()
@@ -2172,11 +2238,21 @@ cofree = Data () "Cofree" [ tVar "f", tVar "a" ]
 
 recfail :: Decl () ()
 recfail = Data () "Rec" [ tVar "f", tVar "a" ]
-  [ Variant "Rec"
+  [ ConDecl "Rec"
     [ tVar "f"
     , app (tVar "f") (tVar "a")
     ] ()
   ]
+
+recTest :: IO ()
+recTest = testInferType $
+  [ Newtype Type "Person" []
+    (ConDeclRec "Person" [ ("getName", TypeCon Type (TyCon "String")) ] ())
+  , Decl ()
+      [ Binding () "foo" [Var () "p"] (App () (Var () "getName") (Var () "p"))
+      ]
+  ]
+
 
 -- tests that inference fails if a kind signature doesn't match
 okFailTest :: IO ()
