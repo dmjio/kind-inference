@@ -29,7 +29,7 @@ showMetaVar mv = showKind (KindMetaVar mv)
 data Decl kind typ
   = Data kind Name [Type kind] [Variant kind typ]
   | TypeSyn kind Name [Type kind] (Type kind)
-  | Class kind Name [Type kind] [Decl kind typ]
+  | Class kind [Pred kind] (Pred kind) [Decl kind typ]
   | Instance [Pred kind] (Pred kind) [Decl kind typ]
   | Newtype kind Name [Type kind] (Variant kind typ)
   | KindSig Name Kind
@@ -102,7 +102,7 @@ instance GetName Name where
 instance GetName (Decl a typ) where
   getName (Data _ name _ _)    = name
   getName (TypeSyn _ name _ _) = name
-  getName (Class _ name _ _)   = name
+  getName (Class _ _ name _)   = getName name
   getName (Newtype _ name _ _) = name
   getName (KindSig name _)     = name
   getName (Instance _ p _)     = getName p
@@ -363,11 +363,18 @@ showDecl (Data a n vars xs) =
           ]
         ]
   ]
-showDecl (Class a n vars decls) =
+showDecl (Class a supers p decls) =
   intercalate " "
-  [ "class"
-  , if null (showAnn a) then n else parens (n <> " :: " <> showAnn a)
-  , intercalate " " (showTypeVar <$> vars)
+  [ "class" <>
+      if null supers
+      then ""
+      else beforeAll " "
+        [ parens (intercalate "," (showPred <$> supers))
+        , "=>"
+        ]
+  , if null (showAnn a)
+    then showPred p
+    else parens (showPred p <> " :: " <> showAnn a)
   , "where"
   , beforeAll "\n  " (showDecl <$> decls)
   ]
@@ -997,11 +1004,12 @@ substitute decl = do
   substituteDecl decl
 
 substituteDecl :: Decl MetaVar () -> Infer (Decl Kind ())
-substituteDecl (Class mv name vars decls) = do
+substituteDecl (Class mv supers p decls) = do
   substitutedKind <- getKind mv
-  vs <- traverse substituteType vars
-  ds <- traverse substituteDecl decls
-  pure (Class substitutedKind name vs ds)
+  supers_ <- traverse substitutePred supers
+  p_ <- substitutePred p
+  decls_ <- traverse substituteDecl decls
+  pure (Class substitutedKind supers_ p_ decls_)
 substituteDecl (TypeSyn mv name vars typ) = do
   substitutedKind <- getKind mv
   vs <- traverse substituteType vars
@@ -1394,10 +1402,10 @@ inferType decl = do
 data TypeScheme = TypeScheme [Name] (Type Kind)
   deriving (Show, Eq)
 
-addToEnv :: Name -> Infer MetaVar
+addToEnv :: GetName name => name -> Infer MetaVar
 addToEnv k = do
   v <- fresh
-  modifyEnv (M.insert k v)
+  modifyEnv (M.insert (getName k) v)
   pure v
 
 modifyEnv :: (Map Name MetaVar -> Map Name MetaVar) -> Infer ()
@@ -1637,21 +1645,23 @@ elaborate (Data () name vars variants) = do
   pure (Data mv name vars' vs)
 elaborate (Newtype () name vars variant) = do
   mv <- addToEnv name
-  handleKindSig name mv
+  handleKindSig  name mv
   (_, mvs) <- fmap (fmap KindMetaVar) <$> populateEnv (getName <$> vars)
   vars' <- traverse elaborateType vars
   v <- elaborateVariant variant
   constrain mv (foldr (-->) Type mvs)
   pure (Newtype mv name vars' v)
-elaborate (Class () name vars decls) = do
-  mv <- addToEnv name
-  handleKindSig name mv
-  void $ populateEnv $ S.toList (freeVars vars <> freeVars decls)
-  vs <- traverse elaborateType vars
-  decls_ <- traverse elaborate decls
-  mvs <- fmap KindMetaVar <$> traverse lookupName vars
+elaborate (Class () supers p decls) = do
+  mv <- addToEnv p
+  handleKindSig (getName p) mv
+  void $ populateEnv $ S.toList (freeVars p <> freeVars decls)
+  supers_ <- traverse elaboratePred supers
+  p_ <- elaboratePred p
+  decls_ <- traverse elaborateDecl decls
+  mvs <- fmap KindMetaVar <$>
+    traverse lookupName (S.toList (freeVars p))
   constrain mv (foldr (-->) Constraint mvs)
-  pure (Class mv name vs decls_)
+  pure (Class mv supers_ p_ decls_)
 elaborate (KindSig name kind) = do
   mv <- addToEnv name
   constrain mv kind
@@ -2120,7 +2130,9 @@ instTestFail
   ]
 
 functor :: Decl () ()
-functor = Class () "Functor" [ tVar "f" ] [TypeSig "fmap" [] fmap_ ]
+functor =
+  Class () [] (Pred "Functor" (tVar "f"))
+    [ TypeSig "fmap" [] fmap_ ]
 
 foreignTest :: IO ()
 foreignTest
