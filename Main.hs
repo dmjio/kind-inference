@@ -29,8 +29,8 @@ showMetaVar mv = showKind (KindMetaVar mv)
 data Decl kind typ
   = Data kind Name [Type kind] [Variant kind typ]
   | TypeSyn kind Name [Type kind] (Type kind)
-  | Class kind Name [Type kind] [Method kind]
-  | Instance [Pred kind] (Pred kind)
+  | Class kind Name [Type kind] [Decl kind typ]
+  | Instance [Pred kind] (Pred kind) [Decl kind typ]
   | Newtype kind Name [Type kind] (Variant kind typ)
   | KindSig Name Kind
   | Foreign Name (Type kind)
@@ -103,17 +103,17 @@ instance GetName Name where
   getName = id
 
 instance GetName (Decl a typ) where
-  getName (Data _ name _ _)        = name
-  getName (TypeSyn _ name _ _)     = name
-  getName (Class _ name _ _)       = name
-  getName (Newtype _ name _ _)     = name
-  getName (KindSig name _)   = name
-  getName (Instance _ p)           = getName p
-  getName (Foreign name _)         = name
-  getName (TypeSig name _ _) = name
-  getName (Fixity _ _ names)       = intercalate "," names
-  getName (Decl _ [])       = error "no bindings"
-  getName (Decl _ (b:_))    = getName b
+  getName (Data _ name _ _)    = name
+  getName (TypeSyn _ name _ _) = name
+  getName (Class _ name _ _)   = name
+  getName (Newtype _ name _ _) = name
+  getName (KindSig name _)     = name
+  getName (Instance _ p _)     = getName p
+  getName (Foreign name _)     = name
+  getName (TypeSig name _ _)   = name
+  getName (Fixity _ _ names)   = intercalate "," names
+  getName (Decl _ [])          = error "no bindings"
+  getName (Decl _ (b:_))       = getName b
 
 instance GetName (Binding kind a) where
   getName (Binding _ name _ _) = name
@@ -366,15 +366,15 @@ showDecl (Data a n vars xs) =
           ]
         ]
   ]
-showDecl (Class a n vars methods) =
+showDecl (Class a n vars decls) =
   intercalate " "
   [ "class"
   , if null (showAnn a) then n else parens (n <> " :: " <> showAnn a)
   , intercalate " " (showTypeVar <$> vars)
   , "where"
-  , beforeAll "\n  " (showMethod <$> methods)
+  , beforeAll "\n  " (showDecl <$> decls)
   ]
-showDecl (Instance ps p) =
+showDecl (Instance ps p decl) =
   intercalate " "
   [ "instance"
   , case ps of
@@ -382,7 +382,7 @@ showDecl (Instance ps p) =
       [x] -> showPred x <> " => " <> showPred p
       xs -> parens $ intercalate ", " (showPred <$> xs) <> " => " <> showPred p
   , "where"
-  ]
+  ] ++ beforeAll "\n  " (showDecl <$> decl)
 showDecl (Newtype a n vars variant) =
   intercalate " "
   [ "newtype"
@@ -512,7 +512,7 @@ beforeAll s xs = s <> intercalate s xs
 
 showListInst :: Decl () typ
 showListInst = Instance [Pred "Show" (tCon "List" `app` tVar "a")]
-  (Pred "Show" (tVar "a"))
+  (Pred "Show" (tVar "a")) []
 
 showMethod :: ShowAnn ann => Method ann -> String
 showMethod (Method name t) =
@@ -900,10 +900,12 @@ substituteDeclTyped (Data k n args vars) = do
   pure (Data k n args vs)
 substituteDeclTyped (TypeSyn kind n args body) =
   pure (TypeSyn kind n args body)
-substituteDeclTyped (Class kind name args body) =
-  pure (Class kind name args body)
-substituteDeclTyped (Instance supers ctx) =
-  pure (Instance supers ctx)
+substituteDeclTyped (Class kind name args decls) = do
+  ds <- traverse substituteDeclTyped decls
+  pure (Class kind name args ds)
+substituteDeclTyped (Instance supers ctx decls) = do
+  ds <- traverse substituteDeclTyped decls
+  pure (Instance supers ctx ds)
 substituteDeclTyped (Newtype kind name args var) = do
   v <- substituteVariantTyped var
   pure (Newtype kind name args v)
@@ -979,11 +981,11 @@ substitute decl = do
   substituteDecl decl
 
 substituteDecl :: Decl MetaVar () -> Infer (Decl Kind ())
-substituteDecl (Class mv name vars methods) = do
+substituteDecl (Class mv name vars decls) = do
   substitutedKind <- getKind mv
   vs <- traverse substituteType vars
-  typ' <- traverse substituteMethod methods
-  pure (Class substitutedKind name vs typ')
+  ds <- traverse substituteDecl decls
+  pure (Class substitutedKind name vs ds)
 substituteDecl (TypeSyn mv name vars typ) = do
   substitutedKind <- getKind mv
   vs <- traverse substituteType vars
@@ -1001,10 +1003,11 @@ substituteDecl (Newtype mv name vars variant) = do
   pure (Newtype substitutedKind name vs substitutedVariant)
 substituteDecl (KindSig name kind) =
   pure (KindSig name kind)
-substituteDecl (Instance supers context) = do
+substituteDecl (Instance supers context decls) = do
+  ds <- traverse substituteDecl decls
   supers_ <- traverse substitutePred supers
   ctx_ <- substitutePred context
-  pure (Instance supers_ ctx_)
+  pure (Instance supers_ ctx_ ds)
 substituteDecl (TypeSig name ctx typ) = do
   ctx_ <- traverse substitutePred ctx
   t <- substituteType typ
@@ -1420,10 +1423,12 @@ elaborateDeclTyped (Data kind name args vars) = do
   pure (Data kind name args vs)
 elaborateDeclTyped (TypeSyn kind n args body) =
   pure (TypeSyn kind n args body)
-elaborateDeclTyped (Class kind name args body) =
-  pure (Class kind name args body)
-elaborateDeclTyped (Instance supers ctx) =
-  pure (Instance supers ctx)
+elaborateDeclTyped (Class kind name args decls) = do
+  ds <- traverse elaborateDeclTyped decls
+  pure (Class kind name args ds)
+elaborateDeclTyped (Instance supers ctx decls) = do
+  ds <- traverse elaborateDeclTyped decls
+  pure (Instance supers ctx ds)
 elaborateDeclTyped (Newtype kind name args var) = do
   let con = mkTypeCon kind name args
   v <- elaborateVariantType con var
@@ -1627,25 +1632,26 @@ elaborate (Newtype () name vars variant) = do
   v <- elaborateVariant variant
   constrain mv (foldr KindFun Type mvs)
   pure (Newtype mv name vars' v)
-elaborate (Class () name vars methods) = do
+elaborate (Class () name vars decls) = do
   mv <- addToEnv name
   handleKindSig name mv
-  void $ populateEnv (getFreeVars vars methods)
+  void $ populateEnv $ S.toList (freeVars vars <> freeVars decls)
   vs <- traverse elaborateType vars
-  methods_ <- traverse elaborateMethod methods
+  decls_ <- traverse elaborate decls
   mvs <- fmap KindMetaVar <$> traverse lookupName vars
   constrain mv (foldr KindFun Constraint mvs)
-  pure (Class mv name vs methods_)
+  pure (Class mv name vs decls_)
 elaborate (KindSig name kind) = do
   mv <- addToEnv name
   constrain mv kind
   pure (KindSig name kind)
-elaborate (Instance supers ctx) = do
+elaborate (Instance supers ctx decls) = do
   checkInstanceHead supers ctx
   addContextToEnv supers
   supers_ <- traverse elaboratePred supers
   ctx_ <- elaboratePred ctx
-  pure (Instance supers_ ctx_)
+  decls_ <- traverse elaborate decls
+  pure (Instance supers_ ctx_ decls_)
 elaborate (TypeSig name ctx typ) = do
   mv <- addToEnv name
   addContextToEnv ctx
@@ -1849,11 +1855,11 @@ annKind (Data x _ _ _)          = x
 annKind (TypeSyn x _ _ _)       = x
 annKind (Class x _ _ _)         = x
 annKind (Newtype x _ _ _)       = x
-annKind (KindSig _ k)     = k
+annKind (KindSig _ k)           = k
 annKind (TypeSig _ _ _)         = Type
-annKind (Instance _ _)          = Constraint
+annKind (Instance _ _ _)        = Constraint
 annKind (Foreign _ _)           = Type
-annKind (Decl _ _)       = Type
+annKind (Decl _ _)              = Type
 annKind (Fixity _ _ _)          = error "no kind for fixity declaration"
 
 constrainType :: MetaVar -> Type Kind -> Infer ()
@@ -2084,6 +2090,7 @@ instTestFunctorMaybe
   , Instance
       []
       (Pred "Functor" (tCon "Maybe"))
+      []
   ]
 
 oops :: IO ()
@@ -2093,6 +2100,7 @@ oops
   , Instance
       [ Pred "Eq" (tVar "b") ]
       (Pred "Functor" (tCon "Maybe"))
+      []
   ]
 
 instTestNumEither :: IO ()
@@ -2102,6 +2110,7 @@ instTestNumEither
   , Instance
       [ Pred "Num" (tVar "a") ]
       (Pred "Functor" (tCon "Either" `app` tCon "a"))
+      []
   ]
 
 data List a = Nil | List a (List a)
@@ -2110,11 +2119,11 @@ instTestFail :: IO ()
 instTestFail
   = testInfer
   [ functor
-  , Instance [] (Pred "Functor" (tCon "Int"))
+  , Instance [] (Pred "Functor" (tCon "Int")) []
   ]
 
 functor :: Decl () ()
-functor = Class () "Functor" [ tVar "f" ] [Method "fmap" fmap_]
+functor = Class () "Functor" [ tVar "f" ] [TypeSig "fmap" [] fmap_ ]
 
 foreignTest :: IO ()
 foreignTest
