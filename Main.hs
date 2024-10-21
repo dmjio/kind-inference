@@ -93,9 +93,6 @@ data Lit
 data Pred a = Pred Name (Type a)
   deriving (Show, Eq, Ord)
 
-data Method a = Method Name (Type a)
-  deriving (Show, Eq)
-
 class GetName f where
   getName :: f -> Name
 
@@ -514,14 +511,6 @@ showListInst :: Decl () typ
 showListInst = Instance [Pred "Show" (tCon "List" `app` tVar "a")]
   (Pred "Show" (tVar "a")) []
 
-showMethod :: ShowAnn ann => Method ann -> String
-showMethod (Method name t) =
-  intercalate " "
-  [ name
-  , "::"
-  , showType t
-  ]
-
 showPred :: ShowAnn ann => Pred ann -> String
 showPred (Pred name typ) =
   intercalate " "
@@ -782,16 +771,43 @@ instance Substitution a => Substitution [a] where
   freeVars = S.unions . fmap freeVars
   metaVars = S.unions . fmap metaVars
 
-instance Substitution (Decl kind typ) where
-  -- | Data kind Name [Type kind] [Variant kind typ]
-  -- | TypeSyn kind Name [Type kind] (Type kind)
-  -- | Class kind Name [Type kind] [Method kind]
-  -- | Instance [Pred kind] (Pred kind)
-  -- | Newtype kind Name [Type kind] (Variant kind typ)
-  -- | KindSig Name Kind
-  -- | Foreign Name (Type kind)
-  -- | TypeSig Name [Pred kind] (Type kind)
-  -- | Fixity Fixity (Maybe Int) [Name]
+instance Substitution t => Substitution (Variant kind t) where
+  freeVars (Variant _ typs typ) =
+    freeVars typs `S.union`
+      freeVars typ
+
+  metaVars (Variant _ typs typ) =
+    metaVars typs `S.union`
+      metaVars typ
+
+instance Substitution () where
+  freeVars = mempty
+  metaVars = mempty
+
+instance Substitution t => Substitution (Decl kind t) where
+  freeVars (Data _ _ ts vs) =
+    freeVars ts `S.union` freeVars vs
+
+  freeVars (TypeSyn _ _ ts t) =
+    freeVars ts `S.union` freeVars t
+
+  freeVars (Class _ _ ts ds) =
+    freeVars ts `S.union` freeVars ds
+
+  freeVars (Instance s c ds) =
+    freeVars s
+      `S.union` freeVars c
+      `S.union` freeVars ds
+
+  freeVars (Newtype _ _ t v) =
+    freeVars t `S.union` freeVars v
+
+  freeVars (KindSig _ k) =
+    freeVars k
+
+  freeVars (TypeSig _ preds typ) =
+    freeVars typ `S.union` freeVars preds
+
   freeVars (Decl _ bindings) =
     freeVars bindings
   freeVars _ = mempty
@@ -1075,11 +1091,6 @@ substituteVariant
 substituteVariant (Variant name types t) = do
   substituted <- traverse substituteType types
   pure (Variant name substituted t)
-
-substituteMethod :: Method MetaVar -> Infer (Method Kind)
-substituteMethod (Method name typ) = do
-  t <- substituteType typ
-  pure (Method name t)
 
 substituteType :: Type MetaVar -> Infer (Type Kind)
 substituteType (TypeCon mv tyCon) = do
@@ -1614,7 +1625,7 @@ elaborate (TypeSyn () name vars typ) = do
   let mvs = fmap KindMetaVar ms
   vs <- traverse elaborateType vars
   t <- elaborateType typ
-  constrain mv (foldr KindFun (KindMetaVar (ann t)) mvs)
+  constrain mv (foldr (-->) (KindMetaVar (ann t)) mvs)
   pure (TypeSyn mv name vs t)
 elaborate (Data () name vars variants) = do
   mv <- addToEnv name
@@ -1622,7 +1633,7 @@ elaborate (Data () name vars variants) = do
   (_, mvs) <- fmap (fmap KindMetaVar) <$> populateEnv (getName <$> vars)
   vars' <- traverse elaborateType vars
   vs <- traverse elaborateVariant variants
-  constrain mv (foldr KindFun Type mvs)
+  constrain mv (foldr (-->) Type mvs)
   pure (Data mv name vars' vs)
 elaborate (Newtype () name vars variant) = do
   mv <- addToEnv name
@@ -1630,7 +1641,7 @@ elaborate (Newtype () name vars variant) = do
   (_, mvs) <- fmap (fmap KindMetaVar) <$> populateEnv (getName <$> vars)
   vars' <- traverse elaborateType vars
   v <- elaborateVariant variant
-  constrain mv (foldr KindFun Type mvs)
+  constrain mv (foldr (-->) Type mvs)
   pure (Newtype mv name vars' v)
 elaborate (Class () name vars decls) = do
   mv <- addToEnv name
@@ -1639,7 +1650,7 @@ elaborate (Class () name vars decls) = do
   vs <- traverse elaborateType vars
   decls_ <- traverse elaborate decls
   mvs <- fmap KindMetaVar <$> traverse lookupName vars
-  constrain mv (foldr KindFun Constraint mvs)
+  constrain mv (foldr (-->) Constraint mvs)
   pure (Class mv name vs decls_)
 elaborate (KindSig name kind) = do
   mv <- addToEnv name
@@ -1695,20 +1706,6 @@ elaboratePred (Pred name typ) = do
   type_ <- elaborateType typ
   constrain class_ (KindMetaVar (ann type_) --> Constraint)
   pure (Pred name type_)
-
-getFreeVars :: GetName name => [name] -> [Method a] -> [Name]
-getFreeVars vars methods = S.toList fvs
-  where
-    fvs =
-      S.unions
-      [ S.unions [ freeVars t | Method _ t <- methods ]
-      , S.fromList (getName <$> vars)
-      ]
-
-elaborateMethod :: Method () -> Infer (Method MetaVar)
-elaborateMethod (Method name typ) = do
-  t <- elaborateType typ
-  pure (Method name t)
 
 elaborateVariant :: Variant () () -> Infer (Variant MetaVar ())
 elaborateVariant (Variant name types typ) = do
