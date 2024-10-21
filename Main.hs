@@ -73,11 +73,16 @@ data Exp kind typ
   -- Patterns
   | As typ Name (Pat kind typ)
   | Con typ Name [Pat kind typ]
-  | Let typ [Decl kind typ] (Exp kind typ)
   | Wildcard typ
+  -- Control
+  | Let typ [Decl kind typ] (Exp kind typ)
   | IfThenElse typ (Exp kind typ) (Exp kind typ) (Exp kind typ)
+  | Case typ (Exp kind typ) [Alt kind typ]
   -- Others
   | TypeAnn (Type kind) (Exp kind typ)
+  deriving (Show, Eq)
+
+data Alt kind typ = Alt (Pat kind typ) (Exp kind typ)
   deriving (Show, Eq)
 
 type Pat typ kind = Exp typ kind
@@ -200,6 +205,9 @@ showTypeVar x                       = parens (showType_ x)
 
 parens :: String -> String
 parens x = "(" <> x <> ")"
+
+braces :: String -> String
+braces x = "{" <> x <> "}"
 
 showScheme :: Scheme -> String
 showScheme (Scheme [] k) = showKind k
@@ -454,10 +462,30 @@ showExp :: (ShowAnn typ, ShowAnn kind) => Exp kind typ -> String
 showExp (App _ f x) = showExpVar f <> " " <> showExp x
 showExp x = showExpVar x
 
+showAlt
+  :: (ShowAnn kin, ShowAnn typ)
+  => Alt kin typ
+  -> String
+showAlt (Alt l r) =
+  intercalate " "
+  [ showExp l
+  , "->"
+  , showExp r
+  ]
+
 showExpVar :: (ShowAnn kind, ShowAnn typ) => Exp kind typ -> String
 showExpVar (Var _ name) = name
 showExpVar (Lit _ lit) = showLit lit
 showExpVar (Wildcard _) = "_"
+showExpVar (Case _ e alts) =
+  intercalate " "
+  [ "case"
+  , showExp e
+  , "of"
+  , "{"
+  , beforeAll "\n " (showAlt <$> alts)
+  , "\n}"
+  ]
 showExpVar (Let _ decls e) =
   intercalate " "
   [ "let {"
@@ -834,6 +862,9 @@ instance Substitution (Exp kind a) where
   freeVars (Let _ decs e)    =
     freeVars e `S.difference` S.fromList (getName <$> decs)
 
+  freeVars (Case _ e alts)    =
+    freeVars e `S.difference` freeVars alts
+
   freeVars (Var _ x)         = S.singleton x
   freeVars (App _ f x)       = freeVars f `S.union` freeVars x
   freeVars (Lam _ args body) = freeVars body `S.difference` freeVars args
@@ -848,6 +879,13 @@ instance Substitution (Exp kind a) where
   freeVars (As _ name _)   = S.singleton name
 
   freeVars (Con _ _ args)   = freeVars args
+
+instance Substitution (Alt kind typ) where
+  freeVars (Alt p e) =
+    freeVars e `S.difference` freeVars p
+
+  metaVars (Alt p e) =
+    metaVars e `S.union` metaVars p
 
 instance Substitution Kind where
   metaVars (KindMetaVar mv) = S.singleton mv
@@ -953,10 +991,25 @@ substituteBindingType (Binding mv name args body) = do
   body' <- substituteExpType body
   pure (Binding typ name args' body')
 
-substituteExpType :: Exp Kind MetaVar -> Infer (Exp Kind (Type Kind))
+substituteAltType
+  :: Alt Kind MetaVar
+  -> Infer (Alt Kind (Type Kind))
+substituteAltType (Alt l r) = do
+  l_ <- substituteExpType l
+  r_ <- substituteExpType r
+  pure (Alt l_ r_)
+
+substituteExpType
+  :: Exp Kind MetaVar
+  -> Infer (Exp Kind (Type Kind))
 substituteExpType (Var mv name) = do
   typ <- getType mv
   pure (Var typ name)
+substituteExpType (Case mv e alts) = do
+  typ <- getType mv
+  e_ <- substituteExpType e
+  alts_ <- traverse substituteAltType alts
+  pure (Case typ e_ alts_)
 substituteExpType (Con mv name args) = do
   typ <- getType mv
   args' <- traverse substituteExpType args
@@ -1051,6 +1104,9 @@ substituteBinding (Binding t name pats ex) = do
   e <- substituteExp ex
   pure (Binding t name ps e)
 
+substituteAlt :: Alt MetaVar () -> Infer (Alt Kind ())
+substituteAlt (Alt l r) = Alt <$> substituteExp l <*> substituteExp r
+
 substituteExp :: Exp MetaVar () -> Infer (Exp Kind ())
 substituteExp (Var () n) =
   pure (Var () n)
@@ -1060,6 +1116,10 @@ substituteExp (App typ e1 e2) = do
   e1' <- substituteExp e1
   e2' <- substituteExp e2
   pure (App typ e1' e2')
+substituteExp (Case () e alts) = do
+  e_ <- substituteExp e
+  alts_ <- traverse substituteAlt alts
+  pure (Case () e_ alts_)
 substituteExp (Lam () args e) = do
   args' <- traverse substituteExp args
   ex <- substituteExp e
@@ -1196,6 +1256,27 @@ isJustWildTypeAnn = testInferType
       ]
   ]
 
+-- Inferred types...
+-- isJust :: (Maybe Bool) -> Bool
+-- isJust x = case x of {
+--  Nothing -> False
+--  (Just (_ :: Bool)) -> True
+-- }
+caseEx :: IO ()
+caseEx = testInferType
+  [ maybeDT
+  , Decl ()
+      [ Binding () "isJust"
+          [ Var () "x"
+          ] $ Case () (Var () "x") alts
+      ]
+  ]  where
+       alts =
+         [ Alt (Con () "Nothing" []) (Lit () (LitBool False))
+         , Alt (Con () "Just" [TypeAnn (TypeCon Type (TyCon "Bool")) (Wildcard ())])
+             (Lit () (LitBool True))
+         ]
+
 ifThenElseEx :: IO ()
 ifThenElseEx = testInferType
   [ Decl ()
@@ -1301,13 +1382,10 @@ addConstructors decls = mapM_ go decls
       let tcon = mkTypeCon kind name args
       forM_ variants $ \(Variant varName varArgs _) -> do
         let t = foldr (-->) tcon varArgs
-        dbg $ "adding: " <> show t
-        dbg $ "adding: " <> show (generalizeType t)
         addToTypeEnv varName (generalizeType t)
-    go (Newtype kind name args (Variant varName varArgs _)) = do
+    go (Newtype kind name args (Variant _ varArgs _)) = do
       let tcon = mkTypeCon kind name args
           t = foldr (-->) tcon varArgs
-      dbg $ "Adding constructor: " <> varName <> " :: " <> showType t
       addToTypeEnv name (generalizeType t)
     go _ = pure ()
 
@@ -1502,6 +1580,10 @@ elaborateExp (TypeAnn t e) = do
   t' <- elaborateType t
   e' <- elaborateExp e
   pure (TypeAnn t' e')
+elaborateExp (Case () e alts) = do
+  e_ <- elaborateExp e
+  alts_ <- traverse elaborateAlt alts
+  pure (Case () e_ alts_)
 elaborateExp (IfThenElse () cond e1 e2) = do
   c <- elaborateExp cond
   e1' <- elaborateExp e1
@@ -1512,13 +1594,33 @@ elaborateExp (Let () decs e) = do
   e' <- elaborateExp e
   pure (Let () decs' e')
 
+elaborateAlt :: Alt () () -> Infer (Alt MetaVar ())
+elaborateAlt (Alt l r) =
+  Alt <$> elaborateExp l <*> elaborateExp r
+
 tFun :: Type Kind -> Type Kind -> Type Kind
 tFun = TypeFun Type
+
+elaborateAltType :: Alt Kind () -> Infer (Alt Kind MetaVar)
+elaborateAltType (Alt l r) =
+  Alt <$> elaborateExpType l <*> elaborateExpType r
 
 elaborateExpType :: Exp Kind () -> Infer (Exp Kind MetaVar)
 elaborateExpType (Var () name) = do
   mv <- lookupNamedType name
   pure (Var mv name)
+elaborateExpType (Case () scrutinee alts) = do
+  patMv <- fresh
+  expMv <- fresh
+  scrutinee_ <- elaborateExpType scrutinee
+  constrainType patMv (TypeMetaVar (ann scrutinee_))
+  alts_ <- traverse elaborateAltType alts
+  forM_ alts_ $ \(Alt pat ex) -> do
+    constrainType patMv (TypeMetaVar (ann pat))
+    constrainType expMv (TypeMetaVar (ann ex))
+  constrainType patMv (TypeMetaVar (ann scrutinee_))
+  pure (Case expMv scrutinee_ alts_)
+
 elaborateExpType (Lit () lit) = do
   mv <- elaborateLit lit
   pure (Lit mv lit)
@@ -1839,6 +1941,7 @@ instance Ann (Exp kind) where
   ann (Var x _)            = x
   ann (Lit x _)            = x
   ann (App x _ _)          = x
+  ann (Case x _ _)         = x
   ann (Lam x _ _)          = x
   ann (As x _ _)           = x
   ann (Con x _ _)          = x
