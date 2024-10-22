@@ -298,8 +298,8 @@ instance Show Error where
   show (UnificationFailedType k1 k2) =
     intercalate "\n"
     [ "Unification type failed"
-    , "Type: " <> showType k1
-    , "Type: " <> showType k2
+    , "Type: " <> showTypeScheme (generalizeType k1)
+    , "Type: " <> showTypeScheme (generalizeType k2)
     ]
   show (UnboundName tyvar) =
     "Unbound Name: " <> show tyvar
@@ -1356,13 +1356,19 @@ isJustWildTypeAnn = testInferType
       ]
   ]
 
+-- thing = do
+--   1 <- Nothing
+--   'k'
+
+-- The last statement in a 'do block' must be an expression (works)
+-- Unification type failed
+-- Type: forall a b . (a :: *) (b :: *) -- (should be (a :: * -> *) iiuc)
+-- Type: Int
 testDoBlock :: IO ()
 testDoBlock = testInferType
   [ maybeDT
   , Decl ()
-      [ Binding () "thing"
-          []
-          $ Do ()
+      [ Binding () "thing" [] $ Do ()
           [ SBind (Lit () (LitInt 1)) (Con () "Nothing" [])
           , SExp (Con () "Nothing" [])
           ]
@@ -1790,7 +1796,7 @@ elaborateExpType (Case () scrutinee alts) = do
 elaborateExpType (Do () stmts) = do
   a <- fresh
   m <- fresh
-  let t = TypeApp (Type) (TypeMetaVar m) (TypeMetaVar a)
+  let t = TypeApp Type (TypeMetaVar m) (TypeMetaVar a)
   mv <- fresh
   constrainType mv t
   void $ populateEnv $ S.toList (freeVars stmts)
@@ -1798,7 +1804,6 @@ elaborateExpType (Do () stmts) = do
   forM_ stmts_ $ \stmt ->
     case stmt of
       SBind p e -> do
-        void $ populateEnv $ S.toList (freeVars p)
         constrainType a (TypeMetaVar (ann p))
         constrainTypes t (TypeMetaVar (ann e))
       SExp e ->
