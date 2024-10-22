@@ -498,9 +498,9 @@ showStmt (SExp e) =
 showExpVar :: (ShowAnn kind, ShowAnn typ) => Exp kind typ -> String
 showExpVar (Do _ stmts) =
   intercalate " "
-    [ "= do"
+    [ "do"
     , beforeAll "\n  "
-      [ showStmt s <> ";"
+      [ showStmt s
       | s <- stmts
       ]
     ]
@@ -909,10 +909,10 @@ instance Substitution (Binding kind typ) where
     freeVars e `S.difference` freeVars args
 
 instance Substitution (Stmt kind a) where
-  freeVars (SBind pat e) =
-    freeVars pat `S.difference` freeVars e
-  freeVars (SExp e) =
-    freeVars e
+  freeVars (SBind pat _) =
+    freeVars pat
+  freeVars (SExp _) =
+    mempty
   metaVars = mempty
 
 instance Substitution (Exp kind a) where
@@ -1356,6 +1356,19 @@ isJustWildTypeAnn = testInferType
       ]
   ]
 
+testDoBlock :: IO ()
+testDoBlock = testInferType
+  [ maybeDT
+  , Decl ()
+      [ Binding () "thing"
+          []
+          $ Do ()
+          [ SBind (Lit () (LitInt 1)) (Con () "Nothing" [])
+          , SExp (Con () "Nothing" [])
+          ]
+      ]
+  ]
+
 -- Inferred types...
 -- isJust :: (Maybe Bool) -> Bool
 -- isJust x = case x of {
@@ -1517,7 +1530,7 @@ inferTypes decls = runInfer $ do
   addConstructorsAndFields decls
   xs <-
     forM decls $ \d -> do
-      dbg ("Inferring type for decl: " <> showDecl d)
+      dbg ("Inferring type for decl:\n" <> showDecl d)
       (maybeScheme, decl) <- inferType d
       mapM_ (addToTypeEnv decl) maybeScheme
       -- decl <$ reset
@@ -1777,16 +1790,18 @@ elaborateExpType (Case () scrutinee alts) = do
 elaborateExpType (Do () stmts) = do
   a <- fresh
   m <- fresh
-  let t = TypeApp (Type --> Type) (TypeMetaVar m) (TypeMetaVar a)
+  let t = TypeApp (Type) (TypeMetaVar m) (TypeMetaVar a)
   mv <- fresh
   constrainType mv t
+  void $ populateEnv $ S.toList (freeVars stmts)
   stmts_ <- traverse elaborateStmtType stmts
   forM_ stmts_ $ \stmt ->
     case stmt of
       SBind p e -> do
+        void $ populateEnv $ S.toList (freeVars p)
         constrainType a (TypeMetaVar (ann p))
         constrainTypes t (TypeMetaVar (ann e))
-      SExp e -> do
+      SExp e ->
         constrainTypes t (TypeMetaVar (ann e))
   case last stmts_ of
     SBind{} ->
