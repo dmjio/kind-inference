@@ -1356,9 +1356,6 @@ isJustWildTypeAnn = testInferType
       ]
   ]
 
--- thing = do
---   1 <- Nothing
---   'k'
 
 -- The last statement in a 'do block' must be an expression (works)
 -- Unification type failed
@@ -1366,11 +1363,12 @@ isJustWildTypeAnn = testInferType
 -- Type: Int
 testDoBlock :: IO ()
 testDoBlock = testInferType
-  [ maybeDT
+  [ eitherDT
   , Decl ()
       [ Binding () "thing" [] $ Do ()
-          [ SBind (Lit () (LitInt 1)) (Con () "Nothing" [])
-          , SExp (Con () "Nothing" [])
+          [ SBind (Lit () (LitString "ay"))
+              (App () (Con () "Right" []) (Lit () (LitString "hey")))
+          , SExp (App () (Con () "Left" []) (Lit () (LitString "oops")))
           ]
       ]
   ]
@@ -2314,6 +2312,15 @@ maybeDT = Data (Type --> Type) "Maybe" [ TypeVar Type (TyVar "a") ]
   , ConDecl "Nothing" [] ()
   ]
 
+eitherDT :: Decl Kind ()
+eitherDT = Data (Type --> Type --> Type) "Either"
+    [ TypeVar Type (TyVar "a")
+    , TypeVar Type (TyVar "b")
+    ]
+    [ ConDecl "Left" [ TypeVar Type (TyVar "a") ] ()
+    , ConDecl "Right" [ TypeVar Type (TyVar "b") ] ()
+    ]
+
 person :: Decl () ()
 person = Data () "Person" []
   [ ConDecl "Person" [ tCon "String", tCon "Int" ] ()
@@ -2349,6 +2356,9 @@ thisthat = Data () "ThisThat" [ tVar "l", tVar "r" ]
 
 tConT :: String -> Type Kind
 tConT n = TypeCon Type (TyCon n)
+
+tVarT :: String -> Type Kind
+tVarT n = TypeVar Type (TyVar n)
 
 tCon :: String -> Type ()
 tCon n = TypeCon () (TyCon n)
