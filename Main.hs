@@ -78,8 +78,14 @@ data Exp kind typ
   | Let typ [Decl kind typ] (Exp kind typ)
   | IfThenElse typ (Exp kind typ) (Exp kind typ) (Exp kind typ)
   | Case typ (Exp kind typ) [Alt kind typ]
+  | Do typ [Stmt kind typ]
   -- Others
   | TypeAnn (Type kind) (Exp kind typ)
+  deriving (Show, Eq)
+
+data Stmt kind typ
+  = SBind (Pat kind typ) (Exp kind typ)
+  | SExp (Exp kind typ)
   deriving (Show, Eq)
 
 data Alt kind typ = Alt (Pat kind typ) (Exp kind typ)
@@ -474,7 +480,25 @@ showAlt (Alt l r) =
   , showExp r
   ]
 
+showStmt :: (ShowAnn kind, ShowAnn typ) => Stmt kind typ -> String
+showStmt (SBind p e) =
+  intercalate " "
+  [ showExp p
+  , "<-"
+  , showExp e
+  ]
+showStmt (SExp e) =
+  showExp e
+
 showExpVar :: (ShowAnn kind, ShowAnn typ) => Exp kind typ -> String
+showExpVar (Do _ stmts) =
+  intercalate " "
+    [ "= do"
+    , beforeAll "\n  "
+      [ showStmt s <> ";"
+      | s <- stmts
+      ]
+    ]
 showExpVar (Var _ name) = name
 showExpVar (Lit _ lit) = showLit lit
 showExpVar (Wildcard _) = "_"
@@ -879,8 +903,18 @@ instance Substitution (Binding kind typ) where
   freeVars (Binding _ _ args e) =
     freeVars e `S.difference` freeVars args
 
+instance Substitution (Stmt kind a) where
+  freeVars (SBind pat e) =
+    freeVars pat `S.difference` freeVars e
+  freeVars (SExp e) =
+    freeVars e
+  metaVars = mempty
+
 instance Substitution (Exp kind a) where
   metaVars _ = mempty
+  freeVars (Do _ stmts)    =
+    freeVars stmts
+
   freeVars (Let _ decs e)    =
     freeVars e `S.difference` S.fromList (getName <$> decs)
 
@@ -1072,6 +1106,21 @@ substituteExpType (Let t decs e) = do
   decs' <- traverse substituteDeclTyped decs
   e' <- substituteExpType e
   pure (Let typ decs' e')
+substituteExpType (Do mv stmts) = do
+  typ <- getType mv
+  stmts_ <- traverse substituteStmtType stmts
+  pure (Do typ stmts_)
+
+substituteStmtType
+  :: Stmt Kind MetaVar
+  -> Infer (Stmt Kind (Type Kind))
+substituteStmtType (SBind p e) = do
+  p_ <- substituteExpType p
+  e_ <- substituteExpType e
+  pure (SBind p_ e_)
+substituteStmtType (SExp e) = do
+  e_ <- substituteExpType e
+  pure (SExp e_)
 
 substitute
   :: Decl MetaVar ()
@@ -1131,7 +1180,9 @@ substituteBinding (Binding t name pats ex) = do
 substituteAlt :: Alt MetaVar () -> Infer (Alt Kind ())
 substituteAlt (Alt l r) = Alt <$> substituteExp l <*> substituteExp r
 
-substituteExp :: Exp MetaVar () -> Infer (Exp Kind ())
+substituteExp
+  :: Exp MetaVar ()
+  -> Infer (Exp Kind ())
 substituteExp (Var () n) =
   pure (Var () n)
 substituteExp (Lit () n) =
@@ -1169,6 +1220,20 @@ substituteExp (Let () decs e) = do
   decs' <- traverse substituteDecl decs
   e' <- substituteExp e
   pure (Let () decs' e')
+substituteExp (Do () stmts) = do
+  stmts_ <- traverse substituteExpStmt stmts
+  pure (Do () stmts_)
+
+substituteExpStmt
+  :: Stmt MetaVar ()
+  -> Infer (Stmt Kind ())
+substituteExpStmt (SBind p e) = do
+  p_ <- substituteExp p
+  e_ <- substituteExp e
+  pure (SBind p_ e_)
+substituteExpStmt (SExp e) = do
+  e_ <- substituteExp e
+  pure (SExp e_)
 
 substitutePred
   :: Pred MetaVar
@@ -1653,6 +1718,20 @@ elaborateExp (Let () decs e) = do
   decs' <- traverse elaborateDecl decs
   e' <- elaborateExp e
   pure (Let () decs' e')
+elaborateExp (Do () stmts) = do
+  stmts_ <- traverse elaborateStmt stmts
+  pure (Do () stmts_)
+
+elaborateStmt
+  :: Stmt () ()
+  -> Infer (Stmt MetaVar ())
+elaborateStmt (SBind p e) = do
+  p_ <- elaborateExp p
+  e_ <- elaborateExp e
+  pure (SBind p_ e_)
+elaborateStmt (SExp e) = do
+  e_ <- elaborateExp e
+  pure (SExp e_)
 
 elaborateAlt :: Alt () () -> Infer (Alt MetaVar ())
 elaborateAlt (Alt l r) =
@@ -1664,6 +1743,16 @@ tFun = TypeFun Type
 elaborateAltType :: Alt Kind () -> Infer (Alt Kind MetaVar)
 elaborateAltType (Alt l r) =
   Alt <$> elaborateExpType l <*> elaborateExpType r
+
+elaborateStmtType :: Stmt Kind () -> Infer (Stmt Kind MetaVar)
+elaborateStmtType (SBind p e) = do
+  p_ <- elaborateExpType p
+  e_ <- elaborateExpType e
+  pure (SBind p_ e_)
+
+elaborateStmtType (SExp e) = do
+  e_ <- elaborateExpType e
+  pure (SExp e_)
 
 elaborateExpType :: Exp Kind () -> Infer (Exp Kind MetaVar)
 elaborateExpType (Var () name) = do
@@ -1680,6 +1769,22 @@ elaborateExpType (Case () scrutinee alts) = do
     constrainType expMv (TypeMetaVar (ann ex))
   constrainType patMv (TypeMetaVar (ann scrutinee_))
   pure (Case expMv scrutinee_ alts_)
+elaborateExpType (Do () stmts) = do
+  mv <- fresh
+  stmts_ <- traverse elaborateStmtType stmts
+  -- forM_ stmts_ $ \stmt ->
+  --   case stmt of
+  --     SBind p e -> do
+  --       constrainType
+  --         (ann e)
+  --         (TypeApp Type
+  --           (TypeMetaVar (ann e))
+  --           (TypeMetaVar (ann p)))
+  case reverse stmts_ of
+    x : _ -> constrainType mv (TypeMetaVar (ann x))
+    _ -> pure ()
+  -- TODO: handle 'last statement in a do-block must be expression' here?
+  pure (Do mv stmts_)
 
 elaborateExpType (Lit () lit) = do
   mv <- elaborateLit lit
@@ -1741,6 +1846,11 @@ elaborateExpType (Let () decs e) = do
   e' <- elaborateExpType e
   constrainType mv (TypeMetaVar (ann e'))
   pure (Let mv decs' e')
+
+getReturnType :: Type a -> Type a
+getReturnType (TypeFun _ _ r) = getReturnType r
+getReturnType (TypeApp _ _ r) = getReturnType r
+getReturnType t = t
 
 generalizeLet :: [(Name, MetaVar)] -> Infer ()
 generalizeLet vars = do
@@ -2003,8 +2113,13 @@ cataKind f (KindScheme (Scheme xs k)) =
 class Ann a where
   ann :: a ann -> ann
 
+instance Ann (Stmt kind) where
+  ann (SExp e) = ann e
+  ann (SBind p _) = ann p
+
 instance Ann (Exp kind) where
   ann (Var x _)            = x
+  ann (Do x _)             = x
   ann (Lit x _)            = x
   ann (App x _ _)          = x
   ann (Case x _ _)         = x
