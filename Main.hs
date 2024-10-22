@@ -281,6 +281,7 @@ data Error
   | OccursCheckFailedType MetaVar (Type Kind)
   | Doesn'tOccurInInstanceHead Name (Pred ()) (Pred ())
   | CouldntFindSubstitution Name MetaVar
+  | LastDoStmtMustBeExp
 
 fresh :: Infer MetaVar
 fresh = do
@@ -331,6 +332,10 @@ instance Show Error where
   show (CouldntFindSubstitution name mv) =
     intercalate "\n"
     [ "Couldn't find " <> name <> " in substitution " <> show mv
+    ]
+  show LastDoStmtMustBeExp =
+    intercalate "\n"
+    [ "The last statement in a 'do block' must be an expression"
     ]
 
 class ShowAnn a where
@@ -1770,20 +1775,23 @@ elaborateExpType (Case () scrutinee alts) = do
   constrainType patMv (TypeMetaVar (ann scrutinee_))
   pure (Case expMv scrutinee_ alts_)
 elaborateExpType (Do () stmts) = do
+  a <- fresh
+  m <- fresh
+  let t = TypeApp (Type --> Type) (TypeMetaVar m) (TypeMetaVar a)
   mv <- fresh
+  constrainType mv t
   stmts_ <- traverse elaborateStmtType stmts
-  -- forM_ stmts_ $ \stmt ->
-  --   case stmt of
-  --     SBind p e -> do
-  --       constrainType
-  --         (ann e)
-  --         (TypeApp Type
-  --           (TypeMetaVar (ann e))
-  --           (TypeMetaVar (ann p)))
-  case reverse stmts_ of
-    x : _ -> constrainType mv (TypeMetaVar (ann x))
+  forM_ stmts_ $ \stmt ->
+    case stmt of
+      SBind p e -> do
+        constrainType a (TypeMetaVar (ann p))
+        constrainTypes t (TypeMetaVar (ann e))
+      SExp e -> do
+        constrainTypes t (TypeMetaVar (ann e))
+  case last stmts_ of
+    SBind{} ->
+      throwError LastDoStmtMustBeExp
     _ -> pure ()
-  -- TODO: handle 'last statement in a do-block must be expression' here?
   pure (Do mv stmts_)
 
 elaborateExpType (Lit () lit) = do
@@ -1860,6 +1868,7 @@ generalizeLet vars = do
   forM_ vars $ \(name, mv) ->
      case M.lookup mv typeSubs of
        Nothing -> throwError (CouldntFindSubstitution name mv)
+       -- TODO: ^ is this possible? we probably don't need this
        Just t -> addToTypeEnv name (generalizeType t)
 
 elaborateLit :: Lit -> Infer MetaVar
@@ -2115,7 +2124,7 @@ class Ann a where
 
 instance Ann (Stmt kind) where
   ann (SExp e) = ann e
-  ann (SBind p _) = ann p
+  ann (SBind _ e) = ann e
 
 instance Ann (Exp kind) where
   ann (Var x _)            = x
