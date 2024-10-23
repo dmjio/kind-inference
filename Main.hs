@@ -74,6 +74,7 @@ data Exp kind typ
   | As typ Name (Pat kind typ)
   | Con typ Name [Pat kind typ]
   | Wildcard typ
+  | Fail typ -- Pattern-match fail constructor
   -- Control
   | Let typ [Decl kind typ] (Exp kind typ)
   | IfThenElse typ (Exp kind typ) (Exp kind typ) (Exp kind typ)
@@ -86,6 +87,7 @@ data Exp kind typ
 data Stmt kind typ
   = SBind (Pat kind typ) (Exp kind typ)
   | SExp (Exp kind typ)
+  -- ^ TODO: add lets in do blocks, generalize, all that yadda
   deriving (Show, Eq)
 
 data Alt kind typ = Alt (Pat kind typ) (Exp kind typ)
@@ -507,6 +509,7 @@ showExpVar (Do _ stmts) =
 showExpVar (Var _ name) = name
 showExpVar (Lit _ lit) = showLit lit
 showExpVar (Wildcard _) = "_"
+showExpVar (Fail _) = ""
 showExpVar (Case _ e alts) =
   intercalate " "
   [ "case"
@@ -931,6 +934,7 @@ instance Substitution (Exp kind a) where
   freeVars (Lam _ args body) = freeVars body `S.difference` freeVars args
   freeVars (Lit _ _)       = mempty
   freeVars (Wildcard _)    = mempty
+  freeVars (Fail _)        = mempty
   freeVars (TypeAnn _ e)   = freeVars e
   freeVars (IfThenElse _ cond e1 e2)   =
     freeVars cond <> freeVars e1 <> freeVars e2
@@ -1097,6 +1101,9 @@ substituteExpType (As mv name e) = do
 substituteExpType (Wildcard mv) = do
   typ <- getType mv
   pure (Wildcard typ)
+substituteExpType (Fail mv) = do
+  typ <- getType mv
+  pure (Fail typ)
 substituteExpType (TypeAnn t e) = do
   e' <- substituteExpType e
   pure (TypeAnn t e')
@@ -1212,6 +1219,8 @@ substituteExp (Con () n args) = do
   pure (Con () n args')
 substituteExp (Wildcard ()) = do
   pure (Wildcard ())
+substituteExp (Fail ()) =
+  pure (Fail ())
 substituteExp (TypeAnn t e) = do
   t' <- substituteType t
   ex <- substituteExp e
@@ -1723,6 +1732,8 @@ elaborateExp (Con () n args) = do
   pure (Con () n as)
 elaborateExp (Wildcard ()) = do
   pure (Wildcard ())
+elaborateExp (Fail ()) = do
+  pure (Fail ())
 elaborateExp (TypeAnn t e) = do
   t' <- elaborateType t
   e' <- elaborateExp e
@@ -1818,6 +1829,9 @@ elaborateExpType (Lit () lit) = do
 elaborateExpType (Wildcard ()) = do
   mv <- fresh
   pure (Wildcard mv)
+elaborateExpType (Fail ()) = do
+  mv <- fresh
+  pure (Fail mv)
 elaborateExpType (App () f x) = do
   fun <- elaborateExpType f
   arg <- elaborateExpType x
@@ -2157,6 +2171,7 @@ instance Ann (Exp kind) where
   ann (TypeAnn _ x)        = ann x
   ann (Let x _ _)          = x
   ann (IfThenElse x _ _ _) = x
+  ann (Fail x)             = x
 
 instance Ann Type where
   ann (TypeVar x _)   = x
@@ -2484,3 +2499,5 @@ typeSig =
     , Pred "Eq" (tVar "m" `app` tVar "a")
     ]
     (tVar "a" --> (tVar "m" `app` tVar "a") --> tCon "Bool")
+
+
