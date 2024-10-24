@@ -84,6 +84,8 @@ data Exp kind typ
   | TypeAnn (Type kind) (Exp kind typ)
   | LeftSection typ (Exp kind typ) Name
   | RightSection typ Name (Exp kind typ)
+  | Tuple typ [Exp kind typ]
+  | List typ [Exp kind typ]
   deriving (Show, Eq)
 
 data Stmt kind typ
@@ -241,6 +243,9 @@ showTypeVar x                       = parens (showType_ x)
 
 parens :: String -> String
 parens x = "(" <> x <> ")"
+
+brackets :: String -> String
+brackets x = "[" <> x <> "]"
 
 braces :: String -> String
 braces x = "{" <> x <> "}"
@@ -529,7 +534,7 @@ showAlt (AltGd l gds decls) =
   ]
 
 -- thing :: Int -> Int
--- thing x = case x of { 
+-- thing x = case x of {
 --  1  | True -> x
 --     | 1 -> 1
 -- }
@@ -581,6 +586,10 @@ showExpVar (LeftSection _ e n) =
   parens (showExp e <> n)
 showExpVar (RightSection _ n e) =
   parens (n <> showExp e)
+showExpVar (Tuple _ exps) =
+  parens (intercalate "," (showExp <$> exps))
+showExpVar (List _ exps) =
+  brackets (intercalate "," (showExp  <$> exps))
 showExpVar (Var _ name) = name
 showExpVar (Lit _ lit) = showLit lit
 showExpVar (Wildcard _) = "_"
@@ -902,7 +911,7 @@ metaVarBind m k = do
 
 metaVarBindType ::  Kind -> MetaVar -> Type Kind -> Infer (Maybe (MetaVar, Type Kind))
 metaVarBindType k1 mv (TypeMetaVar k2 m)
-  | k1 /= k2 = throwError (UnificationFailed k1 k2)
+  | hasKind k1 /= hasKind k2 = throwError (UnificationFailed k1 k2)
   | mv == m = pure Nothing
 metaVarBindType _ m k = do
   dbg ("Binding... " ++ showMetaVar m ++ " : " ++ showType k)
@@ -1003,6 +1012,8 @@ instance Substitution a => Substitution (Stmt kind a) where
     freeVars decls
 
 instance Substitution a => Substitution (Exp kind a) where
+  freeVars (List _ es)        = freeVars es
+  freeVars (Tuple _ es)       = freeVars es
   freeVars (Do _ stmts)       = freeVars stmts
   freeVars (LeftSection _ e _)  = freeVars e
   freeVars (RightSection _ _ e) = freeVars e
@@ -1157,6 +1168,14 @@ substituteAltType (AltGd l gds ds) = do
 substituteExpType
   :: Exp Kind MetaVar
   -> Infer (Exp Kind (Type Kind))
+substituteExpType (List mv es) = do
+  typ <- getType mv
+  es_ <- traverse substituteExpType es
+  pure (List typ es_)
+substituteExpType (Tuple mv es) = do
+  typ <- getType mv
+  es_ <- traverse substituteExpType es
+  pure (Tuple typ es_)
 substituteExpType (LeftSection mv e name) = do
   typ <- getType mv
   e_ <- substituteExpType e
@@ -1323,6 +1342,12 @@ substituteExp (Var () n) =
   pure (Var () n)
 substituteExp (Lit () n) =
   pure (Lit () n)
+substituteExp (Tuple () es) = do
+  es_ <- traverse substituteExp es
+  pure (Tuple () es_)
+substituteExp (List () es) = do
+  es_ <- traverse substituteExp es
+  pure (List () es_)
 substituteExp (App typ e1 e2) = do
   e1' <- substituteExp e1
   e2' <- substituteExp e2
@@ -1428,6 +1453,17 @@ emptyState = InferState mempty defaultKindEnv defaultTypeEnv mempty mempty 0 []
 defaultTypeEnv :: Map String TypeScheme
 defaultTypeEnv = M.fromList
   [ ("(+)", TypeScheme [] (tConT "Int" --> tConT "Int" --> tConT "Int"))
+  , ("(,)", TypeScheme [ "a", "b" ]
+            (tVarT "a" --> tVarT "b" -->
+              (TypeApp Type
+                 (TypeApp Type
+                    (TypeCon (Type --> Type --> Type) (TyCon "(,)"))
+                    (TypeVar Type (TyVar "a")))
+                 (TypeVar Type (TyVar "b")))))
+  , ("[]", TypeScheme [ "a" ]
+              (TypeApp Type
+                  (TypeCon (Type --> Type) (TyCon "[]"))
+                  (TypeVar Type (TyVar "a"))))
   ]
 
 defaultKindEnv :: Map String Scheme
@@ -1443,6 +1479,8 @@ defaultKindEnv = M.fromList
   , ("Eq", Scheme [] (Type --> Constraint))
   , ("IO", Scheme [] (Type --> Type))
   , ("()", Scheme [] Type)
+  , ("(,)", Scheme [] (Type --> Type --> Type))
+  , ("(,,)", Scheme [] (Type --> Type --> Type --> Type))
   , ("(->)", Scheme [] (Type --> Type --> Type))
   , ("StateT", Scheme [] (Type --> (Type --> Type) --> Type --> Type))
   , ("Identity", Scheme [] (Type --> Type))
@@ -1457,211 +1495,6 @@ dbg s = when shouldDebug $ liftIO (putStrLn s)
 
 shouldDebug :: Bool
 shouldDebug = True
-
-letinex :: IO ()
-letinex = testInferType
-  [ Decl () [ Binding () "foo" [] letin ]
-  ] where
-      letin =
-        Let () [ Decl () [ Binding () "id" [ Var () "x" ] (Var () "x") ]
-               , fixf
-               ] (App () (Var () "id") (Lit () (LitInt 1)))
-
-fixf :: Decl Kind ()
-fixf =
-  Decl () [ bb
-          ]
-
-bb :: Binding Kind ()
-bb = Binding () "fix" [ Var () "f" ] (App () (Var () "f") ((App () (Var () "fix")) (Var () "f")))
-
-appp :: Exp Kind ()
-appp = (App () (Var () "f") ((App () (Var () "fix")) (Var () "f")))
-
-
-classT :: IO ()
-classT = testInferType
-  [ Decl () [ Binding () "ten" [] $ Lit () (LitInt 10) ]
-  ]
-
--- | Constructor patterns
-isJustWildTypeAnn :: IO ()
-isJustWildTypeAnn = testInferType
-  [ maybeDT
-  , Decl ()
-      [ Binding () "isJust"
-          [ Con () "Nothing" []
-          ] $ Lit () (LitBool False)
-      , Binding () "isJust"
-          [ Con () "Just" [ TypeAnn tString (Wildcard ()) ]
-          ] $ Lit () (LitBool True)
-      ]
-  ]
-
--- The last statement in a 'do block' must be an expression (works)
-testDoBlock :: IO ()
-testDoBlock = testInferType
-  [ eitherDT
-  , Decl ()
-      [ Binding () "thing" [] $ Do ()
-          [ SBind (Lit () (LitString "ay"))
-              (App () (Con () "Right" []) (Lit () (LitString "hey")))
-          , SExp (App () (Con () "Left" []) (Lit () (LitString "oops")))
-          ]
-      ]
-  ]
-
-testDoBlockLet :: IO ()
-testDoBlockLet = testInferType
-  [ eitherDT
-  , Decl ()
-      [ Binding () "thing" [] $ Do ()
-          [ SLet [ Decl () [ Binding () "x" [] (Lit () (LitInt 1)) ] ]
-          , SExp (Var () "x")
-          ]
-      ]
-  ]
-
-testDoBlockLetFail :: IO ()
-testDoBlockLetFail = testInferType
-  [ eitherDT
-  , Decl ()
-      [ Binding () "thing" [] $ Do ()
-          [ SLet [ Decl () [ Binding () "x" [] (Lit () (LitInt 1)) ] ]
-          , SBind (Lit () (LitString "ay"))
-              (App () (Con () "Right" []) (Lit () (LitString "hey")))
-          , SExp (Var () "x")
-          ]
-      ]
-  ]
-
-loll :: IO ()
-loll = testInferType
-  [ Decl ()
-      [ Binding () "thing" [ Var () "x" ] $ Case () (Var () "x")
-        [ AltGd (Lit () (LitInt 1))
-           [ Guards [ SExp (Lit () (LitBool True)) ] (Var () "x")
-           , Guards [ SExp (Lit () (LitBool False)) ] (Lit () (LitInt 10))
-           ] []
-        ]
-      ]
-  ]
-
-
--- Inferred types...
--- isJust :: (Maybe Bool) -> Bool
--- isJust x = case x of {
---  Nothing -> False
---  (Just (_ :: Bool)) -> True
--- }
-caseEx :: IO ()
-caseEx = testInferType
-  [ maybeDT
-  , Decl ()
-      [ Binding () "isJust"
-          [ Var () "x"
-          ] $ Case () (Var () "x") alts
-      ]
-  ]  where
-       alts =
-         [ Alt (Con () "Nothing" []) (Lit () (LitBool False)) []
-         , Alt (Con () "Just" [TypeAnn (TypeCon Type (TyCon "Bool")) (Wildcard ())])
-             (Lit () (LitBool True)) []
-         ]
-
-ifThenElseEx :: IO ()
-ifThenElseEx = testInferType
-  [ Decl ()
-      [ Binding () "foo"
-          [ Var () "x"
-          ]
-          (IfThenElse ()
-             (Lit () (LitBool True))
-              (Lit () (LitInt 1))
-              (Lit () (LitInt 2)))
-      ]
-  ]
-
-idstr :: IO ()
-idstr = testInferType
-  [ Decl ()
-      [ Binding () "id"
-          [ TypeAnn tString (Var () "x")
-          ]
-          (Var () "x")
-      ]
-  ]
-
-constDecStr :: IO ()
-constDecStr = testInferType
-  [ Decl ()
-      [ Binding () "const"
-          [ Var () "x"
-          , TypeAnn tString (Wildcard ())
-          ]
-          (Var () "x")
-      ]
-  ]
-
-tString :: Type Kind
-tString = TypeCon Type (TyCon "String")
-
-tt :: IO ()
-tt = testInferType
-  [ dec constFunc
-  , dec idFunc
-  , dec addOne
-  , dec constChar
-  , dec idStr
-  , dec someDouble
-  , dec lamConst
-  , dec dollar
-  , dec lamInt
-  , dec asEx
-  ]
-  where
-    idFunc     = b "id" [ v "x" ] (v "x")
-    constFunc  = b "const" [ v "a", v "b" ] (v "a")
-    addOne     = b "addOne" [ v "x" ] (v "(+)" `appE` v "x" `appE` lint 1)
-    constChar  = b "constChar" [ ] (v "const" `appE` char 'a')
-    idStr      = b "idStr" [ ] (v "id" `appE` str "lol")
-    someDouble = b "double" [ ] (double 3.14)
-    lamConst   = b "lamConst" [ ] (lam [ v "x" ] (lam [ v "y" ] (v "x")))
-    dollar     = b "($)" [ v "f", v "x" ] (v "f" `appE` v "x")
-    lamInt     = b "lamInt" [] (lam [ v "x" ] (v "x") `appE` lint 100)
-    asEx       = b "asExp" [as "foo" (lint 1)] (v "foo")
-
-    appE   = App ()
-    b      = Binding ()
-    dec    = Decl () . pure
-    v      = Var ()
-    lint   = Lit () . LitInt
-    char   = Lit () . LitChar
-    str    = Lit () . LitString
-    double = Lit () . LitDouble
-    lam    = Lam ()
-    as     = As ()
-
-testInferType :: [Decl Kind ()] -> IO ()
-testInferType decls = do
-  dbg "Decls..."
-  dbg $ intercalate "\n" (showDecl <$> decls)
-  result <- inferTypes decls
-  case result of
-    Left err -> print err
-    Right ds -> do
-      dbg "\nInferred types..."
-      forM_ ds $ \decl -> do
-        case decl of
-          Decl typ bindings -> do
-            let
-              scheme = generalizeType typ
-              name = getName decl
-            dbg $ name <> " :: " <> showTypeScheme scheme
-            forM_ bindings $ \b ->
-              putStrLn (showBinding b)
-            putStrLn ""
-          _ -> pure ()
 
 -- TODO: instead of this, return [TypeScheme] from `inferType`
 -- so you can add all the variants to the typeEnv
@@ -1699,39 +1532,6 @@ addConstructorsAndFields decls = mapM_ go decls
         let ty = tcon --> t1
         addToTypeEnv n (generalizeType ty)
     go _ = pure ()
-
-inferTypes
-  :: [Decl Kind ()]
-  -> IO (Either Error [Decl Kind (Type Kind)])
-inferTypes decls = runInfer $ do
-  addTypeSigs decls
-  addBindings decls
-  addConstructorsAndFields decls
-  xs <-
-    forM decls $ \d -> do
-      dbg ("Inferring type for decl:\n" <> showDecl d)
-      (maybeScheme, decl) <- inferType d
-      mapM_ (addToTypeEnv decl) maybeScheme
-      -- decl <$ reset
-      pure decl
-  dump "done"
-  pure xs
-
-reset :: Infer ()
-reset =
-  modify $ \s ->
-    s { env = mempty
-      , substitutions = mempty
-      , var = 0
-      }
-
-inferKinds :: [Decl () ()] -> IO (Either Error [Decl Kind ()])
-inferKinds decls = runInfer $ do
-  addKindSigs decls
-  forM decls $ \d -> do
-    (scheme, decl) <- inferKind d
-    addToKindEnv decl scheme
-    decl <$ reset
 
 addKindSigs :: [Decl a ()] -> Infer ()
 addKindSigs decls = do
@@ -1925,6 +1725,12 @@ elaborateExp (LeftSection () e n) = do
 elaborateExp (RightSection () n e) = do
   e_ <- elaborateExp e
   pure (RightSection () n e_)
+elaborateExp (Tuple () es) = do
+  es_ <- traverse elaborateExp es
+  pure (Tuple () es_)
+elaborateExp (List () es) = do
+  es_ <- traverse elaborateExp es
+  pure (List () es_)
 
 elaborateStmt
   :: Stmt () ()
@@ -1997,7 +1803,9 @@ elaborateStmtType (SLet decls) = do
   generalizeLet vs
   pure (SLet decls_)
 
-elaborateExpType :: Exp Kind () -> Infer (Exp Kind MetaVar)
+elaborateExpType
+  :: Exp Kind ()
+  -> Infer (Exp Kind MetaVar)
 elaborateExpType (Var () name) = do
   mv <- lookupNamedType name
   pure (Var mv name)
@@ -2019,7 +1827,6 @@ elaborateExpType (Case () scrutinee alts) = do
           forM_ stmts $ \stmt ->
             case stmt of
               SBind p_ e_ ->
-                -- void $ populateEnv $ S.toList (freeVars p_)
                 constrainType (ann p_) (TypeMetaVar Type (ann e_))
               SExp e_ ->
                 constrainType (ann e_) (TypeCon Type (TyCon "Bool"))
@@ -2047,7 +1854,6 @@ elaborateExpType (Do () stmts) = do
   case last stmts_ of
     SExp _ -> pure ()
     _ -> throwError LastDoStmtMustBeExp
-
   pure (Do mv stmts_)
 
 elaborateExpType (Lit () lit) = do
@@ -2117,7 +1923,8 @@ elaborateExpType (LeftSection () e n) = do
   mv <- fresh
   e_ <- elaborateExpType e
   n_ <- lookupNamedType n
-  constrainType n_ (TypeMetaVar Type (ann e_) --> TypeMetaVar Type mv)
+  constrainType n_
+    (TypeMetaVar Type (ann e_) --> TypeMetaVar Type mv)
   pure (LeftSection mv e_ n)
 elaborateExpType (RightSection () n e) = do
   mv <- fresh
@@ -2125,6 +1932,26 @@ elaborateExpType (RightSection () n e) = do
   n_ <- lookupNamedType n
   constrainType n_ (TypeMetaVar Type (ann e_) --> TypeMetaVar Type mv)
   pure (RightSection mv n e_)
+elaborateExpType (Tuple () es) = do
+  es_ <- traverse elaborateExpType es
+  mv <- fresh
+  con <- lookupNamedType (parens (replicate (length es - 1) ','))
+  constrainType con $
+    foldr tFun (TypeMetaVar Type mv)
+      [ TypeMetaVar Type (ann e)
+      | e <- es_
+      ]
+  pure (Tuple mv es_)
+elaborateExpType (List () es) = do
+  es_ <- traverse elaborateExpType es
+  mv <- fresh
+  con <- lookupNamedType "[]"
+  forM_ es_ $ \e ->
+    constrainType
+      con (TypeApp Type (TypeCon (Type --> Type) (TyCon "[]"))
+             (TypeMetaVar Type (ann e)))
+  constrainType con (TypeMetaVar Type mv)
+  pure (List con es_)
 
 generalizeLet :: [(Name, MetaVar)] -> Infer ()
 generalizeLet vars = do
@@ -2402,6 +2229,8 @@ instance Ann (Exp kind) where
   ann (Fail x)             = x
   ann (LeftSection x _ _)  = x
   ann (RightSection x _ _) = x
+  ann (Tuple x _)          = x
+  ann (List x _)           = x
 
 instance Ann Type where
   ann (TypeVar x _)   = x
@@ -2511,7 +2340,6 @@ testInfer decs = do
         let
           scheme = generalize (annKind decl)
           name = getName decl
-        dbg $ showDecl decl
         dbg $ name <> " :: " <> showScheme scheme
         x <- runInfer (inferType decl)
         case x of
@@ -2614,6 +2442,9 @@ tVar n = TypeVar () (TyVar n)
 app :: Type () -> Type () -> Type ()
 app x y = TypeApp () x y
 
+appT :: Type Kind -> Type Kind -> Type Kind
+appT x y = TypeApp Type x y
+
 fmap_ :: Type ()
 fmap_ = (tVar "a" --> tVar "b")
     --> (tVar "f" `app` tVar "a")
@@ -2686,7 +2517,42 @@ sectionTest
               (LeftSection () (Lit () (LitInt 1)) "(+)")
             ]
   , Decl () [ Binding () "plusOneR" []
-                (RightSection () "(+)" (Lit () (LitInt 1))) 
+                (RightSection () "(+)" (Lit () (LitInt 1)))
+            ]
+  ]
+
+tupleTest :: IO ()
+tupleTest
+  = testInferType
+  [ Decl () [ Binding () "tupleAdd"
+              [ Tuple () [ Var () "x", Var () "y" ]
+              ] (Tuple () [ appE (appE (Var () "(+)") (Var () "x")) (lint 1)
+                          , Var () "y"
+                          ])
+            ]
+  ] where
+      lint = Lit () . LitInt
+      appE = App ()
+
+listTest :: IO ()
+listTest
+  = testInferType
+  [ Decl () [ Binding () "listAdd"
+              [ List () [ Var () "x", Var () "y" ]
+              ] (List () [ appE (appE (Var () "(+)") (Var () "x")) (lint 1)
+                         , Var () "y"
+                         ])
+            ]
+  ] where
+      lint = Lit () . LitInt
+      appE = App ()
+
+listTest2 :: IO ()
+listTest2
+  = testInferType
+  [ Decl () [ Binding () "listAdd"
+              [ List () [ Var () "x", Var () "y", Var () "z" ]
+              ] (List () [])
             ]
   ]
 
@@ -2709,8 +2575,6 @@ instTestNumEither
       (Pred "Functor" (tCon "Either" `app` tCon "a"))
       []
   ]
-
-data List a = Nil | List a (List a)
 
 instTestFail :: IO ()
 instTestFail
@@ -2741,3 +2605,241 @@ typeSig =
     , Pred "Eq" (tVar "m" `app` tVar "a")
     ]
     (tVar "a" --> (tVar "m" `app` tVar "a") --> tCon "Bool")
+
+letinex :: IO ()
+letinex = testInferType
+  [ Decl () [ Binding () "foo" [] letin ]
+  ] where
+      letin =
+        Let () [ Decl () [ Binding () "id" [ Var () "x" ] (Var () "x") ]
+               , fixf
+               ] (App () (Var () "id") (Lit () (LitInt 1)))
+
+fixf :: Decl Kind ()
+fixf =
+  Decl () [ bb
+          ]
+
+bb :: Binding Kind ()
+bb = Binding () "fix" [ Var () "f" ] (App () (Var () "f") ((App () (Var () "fix")) (Var () "f")))
+
+appp :: Exp Kind ()
+appp = (App () (Var () "f") ((App () (Var () "fix")) (Var () "f")))
+
+
+classT :: IO ()
+classT = testInferType
+  [ Decl () [ Binding () "ten" [] $ Lit () (LitInt 10) ]
+  ]
+
+-- | Constructor patterns
+isJustWildTypeAnn :: IO ()
+isJustWildTypeAnn = testInferType
+  [ maybeDT
+  , Decl ()
+      [ Binding () "isJust"
+          [ Con () "Nothing" []
+          ] $ Lit () (LitBool False)
+      , Binding () "isJust"
+          [ Con () "Just" [ TypeAnn tString (Wildcard ()) ]
+          ] $ Lit () (LitBool True)
+      ]
+  ]
+
+-- The last statement in a 'do block' must be an expression (works)
+testDoBlock :: IO ()
+testDoBlock = testInferType
+  [ eitherDT
+  , Decl ()
+      [ Binding () "thing" [] $ Do ()
+          [ SBind (Lit () (LitString "ay"))
+              (App () (Con () "Right" []) (Lit () (LitString "hey")))
+          , SExp (App () (Con () "Left" []) (Lit () (LitString "oops")))
+          ]
+      ]
+  ]
+
+testDoBlockLet :: IO ()
+testDoBlockLet = testInferType
+  [ eitherDT
+  , Decl ()
+      [ Binding () "thing" [] $ Do ()
+          [ SLet [ Decl () [ Binding () "x" [] (Lit () (LitInt 1)) ] ]
+          , SExp (Var () "x")
+          ]
+      ]
+  ]
+
+testDoBlockLetFail :: IO ()
+testDoBlockLetFail = testInferType
+  [ eitherDT
+  , Decl ()
+      [ Binding () "thing" [] $ Do ()
+          [ SLet [ Decl () [ Binding () "x" [] (Lit () (LitInt 1)) ] ]
+          , SBind (Lit () (LitString "ay"))
+              (App () (Con () "Right" []) (Lit () (LitString "hey")))
+          , SExp (Var () "x")
+          ]
+      ]
+  ]
+
+loll :: IO ()
+loll = testInferType
+  [ Decl ()
+      [ Binding () "thing" [ Var () "x" ] $ Case () (Var () "x")
+        [ AltGd (Lit () (LitInt 1))
+           [ Guards [ SExp (Lit () (LitBool True)) ] (Var () "x")
+           , Guards [ SExp (Lit () (LitBool False)) ] (Lit () (LitInt 10))
+           ] []
+        ]
+      ]
+  ]
+
+
+-- Inferred types...
+-- isJust :: (Maybe Bool) -> Bool
+-- isJust x = case x of {
+--  Nothing -> False
+--  (Just (_ :: Bool)) -> True
+-- }
+caseEx :: IO ()
+caseEx = testInferType
+  [ maybeDT
+  , Decl ()
+      [ Binding () "isJust"
+          [ Var () "x"
+          ] $ Case () (Var () "x") alts
+      ]
+  ]  where
+       alts =
+         [ Alt (Con () "Nothing" []) (Lit () (LitBool False)) []
+         , Alt (Con () "Just" [TypeAnn (TypeCon Type (TyCon "Bool")) (Wildcard ())])
+             (Lit () (LitBool True)) []
+         ]
+
+ifThenElseEx :: IO ()
+ifThenElseEx = testInferType
+  [ Decl ()
+      [ Binding () "foo"
+          [ Var () "x"
+          ]
+          (IfThenElse ()
+             (Lit () (LitBool True))
+              (Lit () (LitInt 1))
+              (Lit () (LitInt 2)))
+      ]
+  ]
+
+idstr :: IO ()
+idstr = testInferType
+  [ Decl ()
+      [ Binding () "id"
+          [ TypeAnn tString (Var () "x")
+          ]
+          (Var () "x")
+      ]
+  ]
+
+constDecStr :: IO ()
+constDecStr = testInferType
+  [ Decl ()
+      [ Binding () "const"
+          [ Var () "x"
+          , TypeAnn tString (Wildcard ())
+          ]
+          (Var () "x")
+      ]
+  ]
+
+tString :: Type Kind
+tString = TypeCon Type (TyCon "String")
+
+tt :: IO ()
+tt = testInferType
+  [ dec constFunc
+  , dec idFunc
+  , dec addOne
+  , dec constChar
+  , dec idStr
+  , dec someDouble
+  , dec lamConst
+  , dec dollar
+  , dec lamInt
+  , dec asEx
+  ]
+  where
+    idFunc     = b "id" [ v "x" ] (v "x")
+    constFunc  = b "const" [ v "a", v "b" ] (v "a")
+    addOne     = b "addOne" [ v "x" ] (v "(+)" `appE` v "x" `appE` lint 1)
+    constChar  = b "constChar" [ ] (v "const" `appE` char 'a')
+    idStr      = b "idStr" [ ] (v "id" `appE` str "lol")
+    someDouble = b "double" [ ] (double 3.14)
+    lamConst   = b "lamConst" [ ] (lam [ v "x" ] (lam [ v "y" ] (v "x")))
+    dollar     = b "($)" [ v "f", v "x" ] (v "f" `appE` v "x")
+    lamInt     = b "lamInt" [] (lam [ v "x" ] (v "x") `appE` lint 100)
+    asEx       = b "asExp" [as "foo" (lint 1)] (v "foo")
+
+    appE   = App ()
+    b      = Binding ()
+    dec    = Decl () . pure
+    v      = Var ()
+    lint   = Lit () . LitInt
+    char   = Lit () . LitChar
+    str    = Lit () . LitString
+    double = Lit () . LitDouble
+    lam    = Lam ()
+    as     = As ()
+
+testInferType :: [Decl Kind ()] -> IO ()
+testInferType decls = do
+  dbg "Decls..."
+  dbg $ intercalate "\n" (showDecl <$> decls)
+  result <- inferTypes decls
+  case result of
+    Left err -> print err
+    Right ds -> do
+      dbg "\nInferred types..."
+      forM_ ds $ \decl -> do
+        case decl of
+          Decl typ bindings -> do
+            let
+              scheme = generalizeType typ
+              name = getName decl
+            dbg $ name <> " :: " <> showTypeScheme scheme
+            forM_ bindings $ \b ->
+              putStrLn (showBinding b)
+            putStrLn ""
+          _ -> pure ()
+
+inferTypes
+  :: [Decl Kind ()]
+  -> IO (Either Error [Decl Kind (Type Kind)])
+inferTypes decls = runInfer $ do
+  addTypeSigs decls
+  addBindings decls
+  addConstructorsAndFields decls
+  xs <-
+    forM decls $ \d -> do
+      dbg ("Inferring type for decl:\n" <> showDecl d)
+      (maybeScheme, decl) <- inferType d
+      mapM_ (addToTypeEnv decl) maybeScheme
+      -- decl <$ reset
+      pure decl
+  dump "done"
+  pure xs
+
+reset :: Infer ()
+reset =
+  modify $ \s ->
+    s { env = mempty
+      , substitutions = mempty
+      , var = 0
+      }
+
+inferKinds :: [Decl () ()] -> IO (Either Error [Decl Kind ()])
+inferKinds decls = runInfer $ do
+  addKindSigs decls
+  forM decls $ \d -> do
+    (scheme, decl) <- inferKind d
+    addToKindEnv decl scheme
+    decl <$ reset
