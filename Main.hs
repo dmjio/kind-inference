@@ -90,7 +90,8 @@ data Stmt kind typ
   | SLet [Decl kind typ]
   deriving (Show, Eq)
 
-data Alt kind typ = Alt (Pat kind typ) (Exp kind typ)
+data Alt kind typ
+  = Alt (Pat kind typ) (Exp kind typ) [Decl kind typ]
   deriving (Show, Eq)
 
 type Pat typ kind = Exp typ kind
@@ -499,11 +500,13 @@ showAlt
   :: (ShowAnn kin, ShowAnn typ)
   => Alt kin typ
   -> String
-showAlt (Alt l r) =
+showAlt (Alt l r decls) =
   intercalate " "
   [ showExp l
   , "->"
   , showExp r
+  , "where"
+  , beforeAll "\n  " (showDecl <$> decls)
   ]
 
 showStmt :: (ShowAnn kind, ShowAnn typ) => Stmt kind typ -> String
@@ -978,7 +981,7 @@ instance Substitution a => Substitution (Exp kind a) where
   freeVars (Con _ _ args)   = freeVars args
 
 instance Substitution typ => Substitution (Alt kind typ) where
-  freeVars (Alt p e) =
+  freeVars (Alt p e _) =
     freeVars e `S.difference` freeVars p
 
 instance Substitution Kind where
@@ -1071,7 +1074,8 @@ substituteDeclType (Decl typ bindings) = do
   pure (Decl t bs)
 
 substituteBindingType
-  :: Binding Kind MetaVar -> Infer (Binding Kind (Type Kind))
+  :: Binding Kind MetaVar
+  -> Infer (Binding Kind (Type Kind))
 substituteBindingType (Binding mv name args body) = do
   typ <- getType mv
   args' <- traverse substituteExpType args
@@ -1081,10 +1085,11 @@ substituteBindingType (Binding mv name args body) = do
 substituteAltType
   :: Alt Kind MetaVar
   -> Infer (Alt Kind (Type Kind))
-substituteAltType (Alt l r) = do
+substituteAltType (Alt l r ds) = do
   l_ <- substituteExpType l
   r_ <- substituteExpType r
-  pure (Alt l_ r_)
+  ds_ <- traverse substituteDeclType ds
+  pure (Alt l_ r_ ds_)
 
 substituteExpType
   :: Exp Kind MetaVar
@@ -1213,7 +1218,11 @@ substituteBinding (Binding t name pats ex) = do
   pure (Binding t name ps e)
 
 substituteAlt :: Alt MetaVar () -> Infer (Alt Kind ())
-substituteAlt (Alt l r) = Alt <$> substituteExp l <*> substituteExp r
+substituteAlt (Alt l r ds) =
+  Alt
+    <$> substituteExp l
+    <*> substituteExp r
+    <*> traverse substituteDecl ds
 
 substituteExp
   :: Exp MetaVar ()
@@ -1444,9 +1453,9 @@ caseEx = testInferType
       ]
   ]  where
        alts =
-         [ Alt (Con () "Nothing" []) (Lit () (LitBool False))
+         [ Alt (Con () "Nothing" []) (Lit () (LitBool False)) []
          , Alt (Con () "Just" [TypeAnn (TypeCon Type (TyCon "Bool")) (Wildcard ())])
-             (Lit () (LitBool True))
+             (Lit () (LitBool True)) []
          ]
 
 ifThenElseEx :: IO ()
@@ -1815,15 +1824,20 @@ elaborateStmt (SLet decls) = do
   pure (SLet decls_)
 
 elaborateAlt :: Alt () () -> Infer (Alt MetaVar ())
-elaborateAlt (Alt l r) =
-  Alt <$> elaborateExp l <*> elaborateExp r
+elaborateAlt (Alt l r ds) =
+  Alt <$> elaborateExp l <*> elaborateExp r <*> traverse elaborateDecl ds
 
 tFun :: Type Kind -> Type Kind -> Type Kind
 tFun = TypeFun Type
 
 elaborateAltType :: Alt Kind () -> Infer (Alt Kind MetaVar)
-elaborateAltType (Alt l r) =
-  Alt <$> elaborateExpType l <*> elaborateExpType r
+elaborateAltType (Alt l r decls) = do
+  vs <- uncurry zip <$> populateEnv decls
+  decls_ <- traverse elaborateDeclType decls
+  generalizeLet vs
+  Alt <$> elaborateExpType l
+      <*> elaborateExpType r
+      <*> pure decls_
 
 elaborateStmtType :: Stmt Kind () -> Infer (Stmt Kind MetaVar)
 elaborateStmtType (SBind p e) = do
@@ -1851,7 +1865,7 @@ elaborateExpType (Case () scrutinee alts) = do
   scrutinee_ <- elaborateExpType scrutinee
   constrainType patMv (TypeMetaVar Type (ann scrutinee_))
   alts_ <- traverse elaborateAltType alts
-  forM_ alts_ $ \(Alt pat ex) -> do
+  forM_ alts_ $ \(Alt pat ex _) -> do
     constrainType patMv (TypeMetaVar Type (ann pat))
     constrainType expMv (TypeMetaVar Type (ann ex))
   constrainType patMv (TypeMetaVar Type (ann scrutinee_))
