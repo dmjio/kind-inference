@@ -135,7 +135,7 @@ instance GetName (Pred a) where
 instance GetName (Type a) where
   getName (TypeVar _ name) = getName name
   getName (TypeCon _ name) = getName name
-  getName (TypeMetaVar mv) = getName mv
+  getName (TypeMetaVar _ mv) = getName mv
   getName _ = "<no name>"
 
 instance GetName MetaVar where
@@ -157,7 +157,7 @@ data Type k
   | TypeCon k TyCon
   | TypeFun k (Type k) (Type k)
   | TypeApp k (Type k) (Type k)
-  | TypeMetaVar MetaVar
+  | TypeMetaVar Kind MetaVar
   deriving (Show, Eq, Ord)
 
 newtype KindVar = MkKindVar { unKindVar :: Name }
@@ -172,6 +172,25 @@ data Kind
   | Constraint
   | KindScheme Scheme
   deriving (Show, Eq, Ord)
+
+class HasKind t where
+  hasKind :: t -> Kind
+
+instance HasKind Kind where
+  hasKind = id
+
+instance HasKind (Type Kind) where
+  hasKind (TypeCon k _) = k
+  hasKind (TypeVar k _) = k
+  hasKind (TypeApp k _ _) =
+    case hasKind k of
+      KindFun _ k2 -> k2
+      _ -> k
+  hasKind (TypeFun k _ _) =
+    case hasKind k of
+      KindFun _ k2 -> k2
+      _ -> k
+  hasKind (TypeMetaVar k _) = k
 
 data Scheme = Scheme [Name] Kind
   deriving (Show, Eq, Ord)
@@ -210,7 +229,7 @@ showTypeVar (TypeVar k (TyVar v))
   | null (showAnn k) = v
   | otherwise = parens (v <> " :: " <> showAnn k)
 showTypeVar (TypeCon _ (TyCon c)) = c
-showTypeVar (TypeMetaVar (MetaVar v)) = "{" <> show v <> "}"
+showTypeVar (TypeMetaVar _ (MetaVar v)) = "{" <> show v <> "}"
 showTypeVar x                       = parens (showType_ x)
 
 parens :: String -> String
@@ -625,6 +644,10 @@ showConDecl (ConDecl n ts t) =
 solve :: Infer ()
 solve = do
   dbg "Solving..."
+  dumpConstraints
+  dumpEnv
+  dumpTypeEnv
+  dbg "Done dumping constraints"
   sortConstraints
   solveConstraints
 
@@ -686,7 +709,7 @@ updateConstraintsType m1 k = do
       replaceConstraint (TypeEquality l r) =
         TypeEquality (cataType replaceType l) (cataType replaceType r)
           where
-            replaceType (TypeMetaVar m2) | m1 == m2 = k
+            replaceType (TypeMetaVar _ m2) | m1 == m2 = k
             replaceType x = x
       replaceConstraint x = x
 
@@ -722,7 +745,10 @@ unifyType (TypeCon k1 x) (TypeCon k2 y)
   | x == y = do
       kindCheck k1 k2
       pure Nothing
-unifyType (TypeMetaVar x) (TypeMetaVar y) | x == y = pure Nothing
+unifyType (TypeMetaVar k1 x) (TypeMetaVar k2 y)
+  | x == y = do
+      kindCheck k1 k2
+      pure Nothing
 unifyType (TypeApp k1 x1 y1) (TypeApp k2 x2 y2) = do
   kindCheck k1 k2
   constrainTypes x1 x2
@@ -733,8 +759,8 @@ unifyType (TypeFun k1 x1 y1) (TypeFun k2 x2 y2) = do
   constrainTypes x1 x2
   constrainTypes y1 y2
   pure Nothing
-unifyType (TypeMetaVar x) y = metaVarBindType x y
-unifyType x (TypeMetaVar y) = metaVarBindType y x
+unifyType (TypeMetaVar k x) y = metaVarBindType k x y
+unifyType x (TypeMetaVar k y) = metaVarBindType k y x
 unifyType t1 t2 =
   bail (UnificationFailedType t1 t2)
 
@@ -823,9 +849,11 @@ metaVarBind m k = do
   occursCheck m k
   pure (Just (m, k))
 
-metaVarBindType :: MetaVar -> Type Kind -> Infer (Maybe (MetaVar, Type Kind))
-metaVarBindType mv (TypeMetaVar m) | mv == m = pure Nothing
-metaVarBindType m k = do
+metaVarBindType ::  Kind -> MetaVar -> Type Kind -> Infer (Maybe (MetaVar, Type Kind))
+metaVarBindType k1 mv (TypeMetaVar k2 m)
+  | k1 /= k2 = throwError (UnificationFailed k1 k2)
+  | mv == m = pure Nothing
+metaVarBindType _ m k = do
   dbg ("Binding... " ++ showMetaVar m ++ " : " ++ showType k)
   occursCheckType m k
   pure (Just (m, k))
@@ -843,8 +871,8 @@ updateSubstitutionType m k = modifyTypeSub (M.map replaceInState . M.insert m k)
   where
     replaceInState = cataType $ \t ->
       case t of
-        TypeMetaVar mv | mv == m -> k
-        z                        -> z
+        TypeMetaVar _ mv | mv == m -> k
+        z                          -> z
 
 class MetaVars a where
   metaVars :: a -> Set MetaVar
@@ -857,7 +885,7 @@ instance MetaVars Kind where
 instance MetaVars (Type Kind) where
   metaVars (TypeApp _ t1 t2) = metaVars t1 `S.union` metaVars t2
   metaVars (TypeFun _ t1 t2) = metaVars t1 `S.union` metaVars t2
-  metaVars (TypeMetaVar t)   = S.singleton t
+  metaVars (TypeMetaVar _ t) = S.singleton t
   metaVars _ = mempty
 
 class Substitution k where
@@ -995,7 +1023,7 @@ getKind mv = do
 
 getType :: MetaVar -> Infer (Type Kind)
 getType mv =
-  M.findWithDefault (TypeMetaVar mv) mv <$>
+  M.findWithDefault (TypeMetaVar Type mv) mv <$>
     gets typeSubstitutions
 
 substituteTyped :: Decl Kind MetaVar -> Infer (Decl Kind (Type Kind))
@@ -1284,8 +1312,8 @@ substituteType (TypeFun mv f x) = do
 substituteType (TypeVar mv t) = do
   kind <- getKind mv
   pure (TypeVar kind t)
-substituteType (TypeMetaVar mv) =
-  pure (TypeMetaVar mv)
+substituteType (TypeMetaVar k mv) =
+  pure (TypeMetaVar k mv)
 
 emptyState :: InferState
 emptyState = InferState mempty defaultKindEnv defaultTypeEnv mempty mempty 0 []
@@ -1667,13 +1695,13 @@ elaborateConDeclType
 elaborateConDeclType t (ConDecl name typs ()) = do
   mv <- fresh
   constrainTypes
-    (TypeMetaVar mv)
+    (TypeMetaVar Type mv)
     (foldr (-->) t typs)
   pure (ConDecl name typs mv)
 elaborateConDeclType t (ConDeclRec name fields ()) = do
   mv <- fresh
   constrainTypes
-    (TypeMetaVar mv)
+    (TypeMetaVar Type mv)
     (foldr (-->) t (snd <$> fields))
   pure (ConDeclRec name fields mv)
 
@@ -1682,7 +1710,7 @@ mkTypeCon k n = foldl (TypeApp Type) (TypeCon k (TyCon n))
 
 constrainAll :: Ann f => MetaVar -> [f MetaVar] -> Infer ()
 constrainAll mv xs = sequence_
-  [ constrainType mv (TypeMetaVar (ann x))
+  [ constrainType mv (TypeMetaVar Type (ann x))
   | x <- xs
   ]
 
@@ -1726,8 +1754,8 @@ elaborateBindingType (Binding () name args body) = do
   args' <- traverse elaborateExpType args
   body' <- elaborateExpType body
   constrainType mv $
-    foldr tFun (TypeMetaVar (ann body'))
-    (TypeMetaVar . ann <$> args')
+    foldr tFun (TypeMetaVar Type (ann body'))
+    (TypeMetaVar Type . ann <$> args')
   pure (Binding mv name args' body')
 
 elaborateExp
@@ -1825,12 +1853,12 @@ elaborateExpType (Case () scrutinee alts) = do
   patMv <- fresh
   expMv <- fresh
   scrutinee_ <- elaborateExpType scrutinee
-  constrainType patMv (TypeMetaVar (ann scrutinee_))
+  constrainType patMv (TypeMetaVar Type (ann scrutinee_))
   alts_ <- traverse elaborateAltType alts
   forM_ alts_ $ \(Alt pat ex) -> do
-    constrainType patMv (TypeMetaVar (ann pat))
-    constrainType expMv (TypeMetaVar (ann ex))
-  constrainType patMv (TypeMetaVar (ann scrutinee_))
+    constrainType patMv (TypeMetaVar Type (ann pat))
+    constrainType expMv (TypeMetaVar Type (ann ex))
+  constrainType patMv (TypeMetaVar Type (ann scrutinee_))
   pure (Case expMv scrutinee_ alts_)
 elaborateExpType (Do () stmts) = do
   mv <- fresh
@@ -1841,15 +1869,14 @@ elaborateExpType (Do () stmts) = do
       SBind p e -> do
         m <- fresh
         a <- fresh
-        let t = TypeApp Type (TypeMetaVar m) (TypeMetaVar a)
-        constrainType a (TypeMetaVar (ann p))
-        constrainTypes t (TypeMetaVar (ann e))
+        let t = TypeApp Type (TypeMetaVar (Type --> Type) m) (TypeMetaVar Type a)
+        constrainType a (TypeMetaVar Type(ann p))
+        constrainTypes t (TypeMetaVar Type(ann e))
         constrainType mv t
       SExp e -> do
-        constrainType mv (TypeMetaVar (ann e))
+        constrainType mv (TypeMetaVar Type(ann e))
       SLet _ ->
         pure ()
-
   case last stmts_ of
     SExp _ -> pure ()
     _ -> throwError LastDoStmtMustBeExp
@@ -1870,7 +1897,7 @@ elaborateExpType (App () f x) = do
   arg <- elaborateExpType x
   mv <- fresh
   constrainType (ann fun)
-    (TypeMetaVar (ann arg) --> TypeMetaVar mv)
+    (TypeMetaVar Type (ann arg) --> TypeMetaVar Type mv)
   pure (App mv fun arg)
 elaborateExpType (Lam () args body) = do
   void $ populateEnv $ S.toList (freeVars args)
@@ -1879,13 +1906,13 @@ elaborateExpType (Lam () args body) = do
   mv <- fresh
   constrainType mv $
     foldr (-->)
-      (TypeMetaVar (ann body'))
-      (fmap (TypeMetaVar . ann) args')
+      (TypeMetaVar Type(ann body'))
+      (fmap (TypeMetaVar Type. ann) args')
   pure (Lam mv args' body')
 elaborateExpType (As () name pat) = do
   mv <- lookupNamedType name
   pat' <- elaborateExpType pat
-  constrainType mv (TypeMetaVar (ann pat'))
+  constrainType mv (TypeMetaVar Type(ann pat'))
   pure (As mv name pat')
 elaborateExpType (Con () name args) = do
   _ <- populateEnv $ S.toList (freeVars args)
@@ -1894,12 +1921,12 @@ elaborateExpType (Con () name args) = do
   args' <- traverse elaborateExpType args
   constrainType con
     (foldr tFun
-       (TypeMetaVar mv)
-       (TypeMetaVar . ann <$> args'))
+       (TypeMetaVar Type mv)
+       (TypeMetaVar Type . ann <$> args'))
   pure (Con mv name args')
 elaborateExpType (TypeAnn t e) = do
   e' <- elaborateExpType e
-  constrainTypes t (TypeMetaVar (ann e'))
+  constrainTypes t (TypeMetaVar Type(ann e'))
   pure (TypeAnn t e')
 elaborateExpType (IfThenElse () cond e1 e2) = do
   mv <- fresh
@@ -1907,9 +1934,9 @@ elaborateExpType (IfThenElse () cond e1 e2) = do
   constrainType (ann cond') (TypeCon Type (TyCon "Bool"))
   e1' <- elaborateExpType e1
   e2' <- elaborateExpType e2
-  constrainType (ann e1') (TypeMetaVar (ann e2'))
-  constrainType mv (TypeMetaVar (ann e1'))
-  constrainType mv (TypeMetaVar (ann e2'))
+  constrainType (ann e1') (TypeMetaVar Type(ann e2'))
+  constrainType mv (TypeMetaVar Type(ann e1'))
+  constrainType mv (TypeMetaVar Type(ann e2'))
   pure (IfThenElse mv cond' e1' e2')
 elaborateExpType (Let () decs e) = do
   mv <- fresh
@@ -1917,7 +1944,7 @@ elaborateExpType (Let () decs e) = do
   decs' <- traverse elaborateDeclType decs
   generalizeLet vars
   e' <- elaborateExpType e
-  constrainType mv (TypeMetaVar (ann e'))
+  constrainType mv (TypeMetaVar Type(ann e'))
   pure (Let mv decs' e')
 
 generalizeLet :: [(Name, MetaVar)] -> Infer ()
@@ -2093,8 +2120,8 @@ elaborateType (TypeFun () l r) = do
     (ann fun)
     (KindMetaVar (ann arg) --> KindMetaVar mv)
   pure (TypeApp mv fun arg)
-elaborateType (TypeMetaVar mv) =
-  pure (TypeMetaVar mv)
+elaborateType (TypeMetaVar k mv) =
+  pure (TypeMetaVar k mv)
 
 funTy :: Type ()
 funTy = tCon "(->)"
@@ -2103,11 +2130,8 @@ lookupKindEnv :: Name -> Infer (Maybe MetaVar)
 lookupKindEnv name = do
   kindEnv <- gets kindEnv
   case M.lookup name kindEnv of
-    Just scheme -> do
-      mv <- fresh
-      kind <- instantiate name scheme
-      constrain mv kind
-      pure (Just mv)
+    Just scheme ->
+      Just <$> instantiate name scheme
     _ -> pure Nothing
 
 lookupName :: GetName name => name -> Infer MetaVar
@@ -2128,22 +2152,21 @@ lookupNamedType named = do
   typEnv <- gets typeEnv
   case M.lookup name typEnv of
     Just scheme -> do
-      mv <- fresh
-      typ <- instantiateType name scheme
-      constrainType mv typ
-      pure mv
+      instantiateType name scheme
     Nothing -> do
       env <- gets env
       case M.lookup name env of
         Nothing -> bail (UnboundName name)
         Just v -> pure v
 
-instantiate :: Name -> Scheme -> Infer Kind
+instantiate :: Name -> Scheme -> Infer MetaVar
 instantiate name s@(Scheme vars kind) = do
+  mv <- fresh
   dbg $ "Instantiating Kind: " <> name <> " :: " <> showScheme s
   mvs <- replicateM (length vars) fresh
   let mapping = M.fromList (zip vars mvs)
-  pure (cataKind (replaceKind mapping) kind)
+  constrain mv (cataKind (replaceKind mapping) kind)
+  pure mv
     where
       replaceKind :: Map Name MetaVar -> Kind -> Kind
       replaceKind mapping (KindVar (MkKindVar v)) =
@@ -2152,17 +2175,19 @@ instantiate name s@(Scheme vars kind) = do
            Just mv -> KindMetaVar mv
       replaceKind _ k = k
 
-instantiateType :: Name -> TypeScheme -> Infer (Type Kind)
+instantiateType :: Name -> TypeScheme -> Infer MetaVar
 instantiateType name s@(TypeScheme vars typ) = do
+  mv <- fresh
   dbg $ "Instantiating Type: " <> name <> " :: " <> showTypeScheme s
   mvs <- replicateM (length vars) fresh
   let mapping = M.fromList (zip vars mvs)
-  pure (cataType (replaceType mapping) typ)
+  constrainType mv (cataType (replaceType mapping) typ)
+  pure mv
     where
       replaceType mapping (TypeVar kind (TyVar v)) =
          case M.lookup v mapping of
            Nothing -> TypeVar kind (TyVar v)
-           Just mv -> TypeMetaVar mv
+           Just mv -> TypeMetaVar Type mv
       replaceType _ k = k
 
 cataKind :: (Kind -> Kind) -> Kind -> Kind
@@ -2207,7 +2232,7 @@ instance Ann Type where
   ann (TypeCon x _)   = x
   ann (TypeApp x _ _) = x
   ann (TypeFun x _ _) = x
-  ann (TypeMetaVar _) = error "Called 'ann' on a MetaVar"
+  ann (TypeMetaVar _ _) = error "Called 'ann' on a MetaVar"
 
 instance Ann (Binding typ) where
   ann (Binding t _ _ _) = t
@@ -2225,7 +2250,7 @@ annKind (Decl _ _)              = Type
 annKind (Fixity _ _ _)          = error "no kind for fixity declaration"
 
 constrainType :: MetaVar -> Type Kind -> Infer ()
-constrainType m t = constrainTypes (TypeMetaVar m) t
+constrainType m t = constrainTypes (TypeMetaVar Type m) t
 
 constrainTypes :: Type Kind -> Type Kind -> Infer ()
 constrainTypes t1 t2 = do
@@ -2261,8 +2286,8 @@ generalizeType typ = TypeScheme vars type'
     vars     = S.toList (freeVars type')
     type'    = cataType quantify typ
 
-    quantify (TypeMetaVar m) = TypeVar Type (TyVar (showT (subs M.! m)))
-    quantify k               = k
+    quantify (TypeMetaVar k m) = TypeVar k (TyVar (showT (subs M.! m)))
+    quantify k                 = k
 
     showT :: Int -> String
     showT = (combos !!)
