@@ -179,7 +179,7 @@ data Kind
   | KindVar KindVar
   | KindMetaVar MetaVar
   | Constraint
-  | KindScheme Scheme
+--  | KindScheme Scheme
   deriving (Show, Eq, Ord)
 
 class HasKind t where
@@ -213,7 +213,7 @@ showKindVar (KindVar (MkKindVar v))   = v
 showKindVar (KindMetaVar (MetaVar v)) = "{" <> show v <> "}"
 showKindVar Type                      = "*"
 showKindVar Constraint                = "Constraint"
-showKindVar (KindScheme scheme)       = showScheme scheme
+-- showKindVar (KindScheme scheme)       = showScheme scheme
 showKindVar x                         = parens (showKind x)
 
 cataType :: (Type a -> Type a) -> Type a -> Type a
@@ -326,8 +326,8 @@ instance Show Error where
   show (UnificationFailed k1 k2) =
     intercalate "\n"
     [ "Unification failed"
-    , "Kind: " <> showKind k1
-    , "Kind: " <> showKind k2
+    , "Kind: " <> show k1
+    , "Kind: " <> show k2
     ]
   show (UnificationFailedType k1 k2) =
     intercalate "\n"
@@ -1079,10 +1079,10 @@ modifyTypeSub f = do
 
 getKind :: MetaVar -> Infer Kind
 getKind mv = do
-  result <- M.findWithDefault (KindMetaVar mv) mv <$> gets substitutions
-  case generalize result of
-    scheme ->
-      pure (KindScheme scheme)
+  M.findWithDefault (KindMetaVar mv) mv <$> gets substitutions
+  -- case generalize result of
+  --   scheme ->
+  --     pure (KindScheme scheme)
 
 getType :: MetaVar -> Infer (Type Kind)
 getType mv =
@@ -2207,8 +2207,8 @@ cataKind f Type =
   f Type
 cataKind f Constraint =
   f Constraint
-cataKind f (KindScheme (Scheme xs k)) =
-  f (KindScheme (Scheme xs (cataKind f k)))
+-- cataKind f (KindScheme (Scheme xs k)) =
+--   f (KindScheme (Scheme xs (cataKind f k)))
 
 class Ann a where
   ann :: a ann -> ann
