@@ -88,7 +88,6 @@ data Stmt kind typ
   = SBind (Pat kind typ) (Exp kind typ)
   | SExp (Exp kind typ)
   | SLet [Decl kind typ]
-  -- ^ TODO: add lets in do blocks, generalize, all that yadda
   deriving (Show, Eq)
 
 data Alt kind typ = Alt (Pat kind typ) (Exp kind typ)
@@ -2203,11 +2202,6 @@ cataKind f (KindScheme (Scheme xs k)) =
 
 class Ann a where
   ann :: a ann -> ann
-
-instance Ann (Stmt kind) where
-  ann (SExp e) = ann e
-  ann (SBind _ e) = ann e
-  ann (SLet _) = error "called ann on SLet [Decl]"
 
 instance Ann (Exp kind) where
   ann (Var x _)            = x
