@@ -657,7 +657,8 @@ sortConstraints = do
   cs <- gets constraints
   let isClassConstraint ClassConstraint{} = True
       isClassConstraint _ = False
-  setConstraints (sortBy (compare `on` isClassConstraint) cs)
+  let (eqs, ccs) = span isClassConstraint cs
+  setConstraints (reverse eqs <> reverse ccs)
 
 setConstraints :: [Constraint] -> Infer ()
 setConstraints xs = modify $ \s -> s { constraints = xs }
@@ -1869,10 +1870,10 @@ elaborateExpType (Do () stmts) = do
       SBind p e -> do
         m <- fresh
         a <- fresh
-        let t = TypeApp Type (TypeMetaVar (Type --> Type) m) (TypeMetaVar Type a)
-        constrainType a (TypeMetaVar Type(ann p))
-        constrainTypes t (TypeMetaVar Type(ann e))
-        constrainType mv t
+        let ma = TypeApp Type (TypeMetaVar (Type --> Type) m) (TypeMetaVar Type a)
+        constrainType a (TypeMetaVar Type (ann p))
+        constrainTypes ma (TypeMetaVar Type (ann e))
+        constrainType mv ma
       SExp e -> do
         constrainType mv (TypeMetaVar Type(ann e))
       SLet _ ->
