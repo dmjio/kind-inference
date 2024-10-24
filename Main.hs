@@ -82,6 +82,8 @@ data Exp kind typ
   | Do typ [Stmt kind typ]
   -- Others
   | TypeAnn (Type kind) (Exp kind typ)
+  | LeftSection typ (Exp kind typ) Name
+  | RightSection typ Name (Exp kind typ)
   deriving (Show, Eq)
 
 data Stmt kind typ
@@ -516,7 +518,7 @@ showAlt (Alt l r decls) =
 showAlt (AltGd l gds decls) =
   intercalate " "
   [ showExp l
-  , beforeAll "| " (showGuards <$> gds)
+  , beforeAll "\n  | " (showGuards <$> gds)
   , if not (null decls)
       then
         intercalate " "
@@ -575,6 +577,10 @@ showExpVar (Do _ stmts) =
       | s <- stmts
       ]
     ]
+showExpVar (LeftSection _ e n) =
+  parens (showExp e <> n)
+showExpVar (RightSection _ n e) =
+  parens (n <> showExp e)
 showExpVar (Var _ name) = name
 showExpVar (Lit _ lit) = showLit lit
 showExpVar (Wildcard _) = "_"
@@ -997,8 +1003,9 @@ instance Substitution a => Substitution (Stmt kind a) where
     freeVars decls
 
 instance Substitution a => Substitution (Exp kind a) where
-  freeVars (Do _ stmts)    =
-    freeVars stmts
+  freeVars (Do _ stmts)       = freeVars stmts
+  freeVars (LeftSection _ e _)  = freeVars e
+  freeVars (RightSection _ _ e) = freeVars e
 
   freeVars (Let _ decs e)    =
     freeVars e `S.difference` S.fromList (getName <$> decs)
@@ -1150,6 +1157,14 @@ substituteAltType (AltGd l gds ds) = do
 substituteExpType
   :: Exp Kind MetaVar
   -> Infer (Exp Kind (Type Kind))
+substituteExpType (LeftSection mv e name) = do
+  typ <- getType mv
+  e_ <- substituteExpType e
+  pure (LeftSection typ e_ name)
+substituteExpType (RightSection mv name e) = do
+  typ <- getType mv
+  e_ <- substituteExpType e
+  pure (RightSection typ name e_)
 substituteExpType (Var mv name) = do
   typ <- getType mv
   pure (Var typ name)
@@ -1346,6 +1361,12 @@ substituteExp (Let () decs e) = do
 substituteExp (Do () stmts) = do
   stmts_ <- traverse substituteExpStmt stmts
   pure (Do () stmts_)
+substituteExp (LeftSection () e n) = do
+  e_ <- substituteExp e
+  pure (LeftSection () e_ n)
+substituteExp (RightSection () n e) = do
+  e_ <- substituteExp e
+  pure (RightSection () n e_)
 
 substituteExpStmt
   :: Stmt MetaVar ()
@@ -1898,6 +1919,12 @@ elaborateExp (Let () decs e) = do
 elaborateExp (Do () stmts) = do
   stmts_ <- traverse elaborateStmt stmts
   pure (Do () stmts_)
+elaborateExp (LeftSection () e n) = do
+  e_ <- elaborateExp e
+  pure (LeftSection () e_ n)
+elaborateExp (RightSection () n e) = do
+  e_ <- elaborateExp e
+  pure (RightSection () n e_)
 
 elaborateStmt
   :: Stmt () ()
@@ -1991,7 +2018,7 @@ elaborateExpType (Case () scrutinee alts) = do
           constrainType expMv (TypeMetaVar Type (ann e))
           forM_ stmts $ \stmt ->
             case stmt of
-              SBind p_ e_ -> do
+              SBind p_ e_ ->
                 -- void $ populateEnv $ S.toList (freeVars p_)
                 constrainType (ann p_) (TypeMetaVar Type (ann e_))
               SExp e_ ->
@@ -2086,6 +2113,18 @@ elaborateExpType (Let () decs e) = do
   e' <- elaborateExpType e
   constrainType mv (TypeMetaVar Type(ann e'))
   pure (Let mv decs' e')
+elaborateExpType (LeftSection () e n) = do
+  mv <- fresh
+  e_ <- elaborateExpType e
+  n_ <- lookupNamedType n
+  constrainType n_ (TypeMetaVar Type (ann e_) --> TypeMetaVar Type mv)
+  pure (LeftSection mv e_ n)
+elaborateExpType (RightSection () n e) = do
+  mv <- fresh
+  e_ <- elaborateExpType e
+  n_ <- lookupNamedType n
+  constrainType n_ (TypeMetaVar Type (ann e_) --> TypeMetaVar Type mv)
+  pure (RightSection mv n e_)
 
 generalizeLet :: [(Name, MetaVar)] -> Infer ()
 generalizeLet vars = do
@@ -2361,6 +2400,8 @@ instance Ann (Exp kind) where
   ann (Let x _ _)          = x
   ann (IfThenElse x _ _ _) = x
   ann (Fail x)             = x
+  ann (LeftSection x _ _)  = x
+  ann (RightSection x _ _) = x
 
 instance Ann Type where
   ann (TypeVar x _)   = x
@@ -2627,6 +2668,7 @@ okTest
   , TypeSyn () "OK" [] (tCon "Int")
   ]
 
+-- TODO: why does this fail?
 instTestFunctorMaybe :: IO ()
 instTestFunctorMaybe
   = testInfer
@@ -2635,6 +2677,17 @@ instTestFunctorMaybe
       []
       (Pred "Functor" (tCon "Maybe"))
       []
+  ]
+
+sectionTest :: IO ()
+sectionTest
+  = testInferType
+  [ Decl () [ Binding () "plusOneL" []
+              (LeftSection () (Lit () (LitInt 1)) "(+)")
+            ]
+  , Decl () [ Binding () "plusOneR" []
+                (RightSection () "(+)" (Lit () (LitInt 1))) 
+            ]
   ]
 
 oops :: IO ()
