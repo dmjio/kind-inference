@@ -1392,11 +1392,7 @@ isJustWildTypeAnn = testInferType
       ]
   ]
 
-
 -- The last statement in a 'do block' must be an expression (works)
--- Unification type failed
--- Type: forall a b . (a :: *) (b :: *) -- (should be (a :: * -> *) iiuc)
--- Type: Int
 testDoBlock :: IO ()
 testDoBlock = testInferType
   [ eitherDT
