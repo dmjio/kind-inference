@@ -88,6 +88,7 @@ data Exp kind typ
   | List typ [Exp kind typ]
   | ListComp typ (Exp kind typ) [Stmt kind typ]
   | Sequence typ (Exp kind typ) (Maybe (Exp kind typ)) (Maybe (Exp kind typ))
+  | PrefixNegation typ (Exp kind typ)
   deriving (Show, Eq)
 
 data Stmt kind typ
@@ -667,6 +668,8 @@ showExpVar (Con _ name args) =
       [ name
       , intercalate " " (showExpVar <$> args)
       ]
+showExpVar (PrefixNegation _ e) =
+  parens ("-" <> showExp e)
 showExpVar x = parens (showExp x)
 
 showLit :: Lit -> String
@@ -1036,6 +1039,8 @@ instance Substitution a => Substitution (Maybe a) where
   freeVars (Just x) = freeVars x
 
 instance Substitution a => Substitution (Exp kind a) where
+  freeVars (PrefixNegation _ e) =
+    freeVars e
   freeVars (Sequence _ e s f) =
     freeVars e <> freeVars s <> freeVars f
   freeVars (ListComp _ e stmts) = freeVars e <> freeVars stmts
@@ -1195,6 +1200,10 @@ substituteAltType (AltGd l gds ds) = do
 substituteExpType
   :: Exp Kind MetaVar
   -> Infer (Exp Kind (Type Kind))
+substituteExpType (PrefixNegation mv e) = do
+  typ <- getType mv
+  e_ <- substituteExpType e
+  pure (PrefixNegation typ e_)
 substituteExpType (List mv es) = do
   typ <- getType mv
   es_ <- traverse substituteExpType es
@@ -1439,6 +1448,9 @@ substituteExp (Sequence () e s f) = do
   s_ <- traverse substituteExp s
   f_ <- traverse substituteExp f
   pure (Sequence () e_ s_ f_)
+substituteExp (PrefixNegation () e) = do
+  e_ <- substituteExp e
+  pure (PrefixNegation () e_)
 
 substituteExpStmt
   :: Stmt MetaVar ()
@@ -1725,6 +1737,9 @@ elaborateBindingType (Binding () name args body) = do
 elaborateExp
   :: Exp () ()
   -> Infer (Exp MetaVar ())
+elaborateExp (PrefixNegation () e) = do
+  e_ <- elaborateExp e
+  pure (PrefixNegation () e_)
 elaborateExp (Var () n) = do
   pure (Var () n)
 elaborateExp (Lit () n) = do
@@ -1866,6 +1881,10 @@ elaborateExpType
 elaborateExpType (Var () name) = do
   mv <- lookupNamedType name
   pure (Var mv name)
+elaborateExpType (PrefixNegation () e) = do
+  e_ <- elaborateExpType e
+  constrainType (ann e_) (TypeCon Type (TyCon "Int"))
+  pure (PrefixNegation (ann e_) e_)
 elaborateExpType (Sequence () e ms mf) = do
   a <- fresh
   e' <- elaborateExpType e
@@ -2301,7 +2320,8 @@ class Ann a where
   ann :: a ann -> ann
 
 instance Ann (Exp kind) where
-  ann (Sequence x _ _ _) = x
+  ann (PrefixNegation x _)         = x
+  ann (Sequence x _ _ _)           = x
   ann (ListComp x _ _)             = x
   ann (Var x _)                    = x
   ann (Do x _)                     = x
@@ -2865,6 +2885,17 @@ idstr = testInferType
           (Var () "x")
       ]
   ]
+
+negtest :: IO ()
+negtest = testInferType
+  [ Decl ()
+      [ Binding () "negate"
+          [ Var () "x"
+          ]
+          (PrefixNegation () (Var () "x"))
+      ]
+  ]
+
 
 constDecStr :: IO ()
 constDecStr = testInferType
