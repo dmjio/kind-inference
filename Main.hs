@@ -87,6 +87,7 @@ data Exp kind typ
   | Tuple typ [Exp kind typ]
   | List typ [Exp kind typ]
   | ListComp typ (Exp kind typ) [Stmt kind typ]
+  | Sequence typ (Exp kind typ) (Maybe (Exp kind typ)) (Maybe (Exp kind typ))
   deriving (Show, Eq)
 
 data Stmt kind typ
@@ -231,7 +232,7 @@ showType t = showType_ (cataType fun t)
 
 showType_ :: ShowAnn ann => Type ann -> String
 showType_ (TypeFun _ l r)   = showTypeVar l <> " -> " <> showType_ r
-showType_ (TypeApp _ f x) = showType_ f <> " " <> showTypeVar x
+showType_ (TypeApp _ f x)   = showType_ f <> " " <> showTypeVar x
 showType_ t                 = showTypeVar t
 
 showTypeVar :: ShowAnn ann => Type ann -> String
@@ -592,6 +593,16 @@ showExpVar (ListComp _ e stmts) =
       | s <- stmts
       ]
     ]
+
+showExpVar (Sequence _ e step end) =
+  brackets $
+    showExp e <>
+      case step of
+        Nothing -> ".."
+        Just s -> "," <> showExp s <> ".." <>
+          case end of
+            Nothing -> ""
+            Just x -> showExp x
 showExpVar (LeftSection _ e n) =
   parens (showExp e <> n)
 showExpVar (RightSection _ n e) =
@@ -1008,7 +1019,6 @@ instance Substitution t => Substitution (Decl kind t) where
 
   freeVars _ = mempty
 
-
 instance Substitution typ => Substitution (Binding kind typ) where
   freeVars (Binding _ _ args _) =
     freeVars args
@@ -1021,7 +1031,13 @@ instance Substitution a => Substitution (Stmt kind a) where
   freeVars (SLet decls) =
     freeVars decls
 
+instance Substitution a => Substitution (Maybe a) where
+  freeVars Nothing = mempty
+  freeVars (Just x) = freeVars x
+
 instance Substitution a => Substitution (Exp kind a) where
+  freeVars (Sequence _ e s f) =
+    freeVars e <> freeVars s <> freeVars f
   freeVars (ListComp _ e stmts) = freeVars e <> freeVars stmts
   freeVars (List _ es)        = freeVars es
   freeVars (Tuple _ es)       = freeVars es
@@ -1253,6 +1269,12 @@ substituteExpType (Do mv stmts) = do
   typ <- getType mv
   stmts_ <- traverse substituteStmtType stmts
   pure (Do typ stmts_)
+substituteExpType (Sequence mv e s f) = do
+  typ <- getType mv
+  e_ <- substituteExpType e
+  s_ <- traverse substituteExpType s
+  f_ <- traverse substituteExpType f
+  pure (Sequence typ e_ s_ f_)
 
 substituteStmtType
   :: Stmt Kind MetaVar
@@ -1412,6 +1434,11 @@ substituteExp (ListComp () e stmts) = do
   e_ <- substituteExp e
   stmts_ <- traverse substituteStmt stmts
   pure (ListComp () e_ stmts_)
+substituteExp (Sequence () e s f) = do
+  e_ <- substituteExp e
+  s_ <- traverse substituteExp s
+  f_ <- traverse substituteExp f
+  pure (Sequence () e_ s_ f_)
 
 substituteExpStmt
   :: Stmt MetaVar ()
@@ -1756,6 +1783,12 @@ elaborateExp (ListComp () e stmts) = do
   e_ <- elaborateExp e
   stmts_ <- traverse elaborateStmt stmts
   pure (ListComp () e_ stmts_)
+elaborateExp (Sequence () e s f) = do
+  e_ <- elaborateExp e
+  s_ <- traverse elaborateExp s
+  f_ <- traverse elaborateExp f
+  pure (Sequence () e_ s_ f_)
+
 elaborateStmt
   :: Stmt () ()
   -> Infer (Stmt MetaVar ())
@@ -1833,6 +1866,22 @@ elaborateExpType
 elaborateExpType (Var () name) = do
   mv <- lookupNamedType name
   pure (Var mv name)
+elaborateExpType (Sequence () e ms mf) = do
+  a <- fresh
+  e' <- elaborateExpType e
+  ms' <- traverse elaborateExpType ms
+  mf' <- traverse elaborateExpType mf
+  constrainType a (TypeMetaVar Type (ann e'))
+  forM_ ms' $ \x ->
+    constrainType a (TypeMetaVar Type (ann x))
+  forM_ mf' $ \x ->
+    constrainType a (TypeMetaVar Type (ann x))
+  mv <- fresh
+  constrainType mv $
+    TypeApp Type
+     (TypeCon (Type --> Type) (TyCon "[]"))
+     (TypeMetaVar Type a)
+  pure (Sequence mv e' ms' mf')
 elaborateExpType (ListComp () e stmts) = do
   mv <- fresh
   e' <- elaborateExpType e
@@ -2252,24 +2301,25 @@ class Ann a where
   ann :: a ann -> ann
 
 instance Ann (Exp kind) where
-  ann (ListComp x _ _)     = x
-  ann (Var x _)            = x
-  ann (Do x _)             = x
-  ann (Lit x _)            = x
-  ann (App x _ _)          = x
-  ann (Case x _ _)         = x
-  ann (Lam x _ _)          = x
-  ann (As x _ _)           = x
-  ann (Con x _ _)          = x
-  ann (Wildcard x)         = x
-  ann (TypeAnn _ x)        = ann x
-  ann (Let x _ _)          = x
-  ann (IfThenElse x _ _ _) = x
-  ann (Fail x)             = x
-  ann (LeftSection x _ _)  = x
-  ann (RightSection x _ _) = x
-  ann (Tuple x _)          = x
-  ann (List x _)           = x
+  ann (Sequence x _ _ _) = x
+  ann (ListComp x _ _)             = x
+  ann (Var x _)                    = x
+  ann (Do x _)                     = x
+  ann (Lit x _)                    = x
+  ann (App x _ _)                  = x
+  ann (Case x _ _)                 = x
+  ann (Lam x _ _)                  = x
+  ann (As x _ _)                   = x
+  ann (Con x _ _)                  = x
+  ann (Wildcard x)                 = x
+  ann (TypeAnn _ x)                = ann x
+  ann (Let x _ _)                  = x
+  ann (IfThenElse x _ _ _)         = x
+  ann (Fail x)                     = x
+  ann (LeftSection x _ _)          = x
+  ann (RightSection x _ _)         = x
+  ann (Tuple x _)                  = x
+  ann (List x _)                   = x
 
 instance Ann Type where
   ann (TypeVar x _)   = x
@@ -2572,6 +2622,30 @@ tupleTest
   ] where
       lint = Lit () . LitInt
       appE = App ()
+
+arithSeqTest :: IO ()
+arithSeqTest
+  = testInferType
+  [ Decl () [ Binding () "test1" []
+                $ Sequence ()
+                   (Lit () (LitInt 2))
+                   (Just (Lit () (LitInt 2)))
+                   (Just (Lit () (LitInt 30)))
+            ]
+  , Decl () [ Binding () "test2" [ Var () "x" ]
+                $ Sequence ()
+                   (Var () "x")
+                   (Just (Lit () (LitInt 2)))
+                   (Just (Lit () (LitInt 30)))
+            ]
+  , Decl () [ Binding () "test3" [ Var () "x" ]
+                $ Sequence ()
+                   (Var () "x")
+                   (Just (Lit () (LitChar 'c')))
+                   (Just (Lit () (LitChar 'z')))
+            ]
+  ]
+
 
 listCompTest :: IO ()
 listCompTest
