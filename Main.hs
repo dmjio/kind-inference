@@ -86,6 +86,7 @@ data Exp kind typ
   | RightSection typ Name (Exp kind typ)
   | Tuple typ [Exp kind typ]
   | List typ [Exp kind typ]
+  | ListComp typ (Exp kind typ) [Stmt kind typ]
   deriving (Show, Eq)
 
 data Stmt kind typ
@@ -582,6 +583,15 @@ showExpVar (Do _ stmts) =
       | s <- stmts
       ]
     ]
+showExpVar (ListComp _ e stmts) =
+  brackets $ intercalate " "
+    [ showExp e
+    , "|"
+    , intercalate ","
+      [ showStmt s
+      | s <- stmts
+      ]
+    ]
 showExpVar (LeftSection _ e n) =
   parens (showExp e <> n)
 showExpVar (RightSection _ n e) =
@@ -1012,6 +1022,7 @@ instance Substitution a => Substitution (Stmt kind a) where
     freeVars decls
 
 instance Substitution a => Substitution (Exp kind a) where
+  freeVars (ListComp _ e stmts) = freeVars e <> freeVars stmts
   freeVars (List _ es)        = freeVars es
   freeVars (Tuple _ es)       = freeVars es
   freeVars (Do _ stmts)       = freeVars stmts
@@ -1172,6 +1183,11 @@ substituteExpType (List mv es) = do
   typ <- getType mv
   es_ <- traverse substituteExpType es
   pure (List typ es_)
+substituteExpType (ListComp mv e stmts) = do
+  typ <- getType mv
+  e_ <- substituteExpType e
+  stmts_ <- traverse substituteStmtType stmts
+  pure (ListComp typ e_ stmts_)
 substituteExpType (Tuple mv es) = do
   typ <- getType mv
   es_ <- traverse substituteExpType es
@@ -1392,6 +1408,10 @@ substituteExp (LeftSection () e n) = do
 substituteExp (RightSection () n e) = do
   e_ <- substituteExp e
   pure (RightSection () n e_)
+substituteExp (ListComp () e stmts) = do
+  e_ <- substituteExp e
+  stmts_ <- traverse substituteStmt stmts
+  pure (ListComp () e_ stmts_)
 
 substituteExpStmt
   :: Stmt MetaVar ()
@@ -1464,6 +1484,7 @@ defaultTypeEnv = M.fromList
               (TypeApp Type
                   (TypeCon (Type --> Type) (TyCon "[]"))
                   (TypeVar Type (TyVar "a"))))
+  , ("even", TypeScheme [] (tConT "Int" --> tConT "Bool"))
   ]
 
 defaultKindEnv :: Map String Scheme
@@ -1731,7 +1752,10 @@ elaborateExp (Tuple () es) = do
 elaborateExp (List () es) = do
   es_ <- traverse elaborateExp es
   pure (List () es_)
-
+elaborateExp (ListComp () e stmts) = do
+  e_ <- elaborateExp e
+  stmts_ <- traverse elaborateStmt stmts
+  pure (ListComp () e_ stmts_)
 elaborateStmt
   :: Stmt () ()
   -> Infer (Stmt MetaVar ())
@@ -1809,6 +1833,20 @@ elaborateExpType
 elaborateExpType (Var () name) = do
   mv <- lookupNamedType name
   pure (Var mv name)
+elaborateExpType (ListComp () e stmts) = do
+  mv <- fresh
+  e' <- elaborateExpType e
+  stmts' <- traverse elaborateStmtType stmts
+  forM_ stmts' $ \stmt ->
+    case stmt of
+      SBind p_ e_ ->
+        constrainType (ann p_) (TypeMetaVar Type (ann e_))
+      SExp e_ ->
+        constrainType (ann e_) (TypeCon Type (TyCon "Bool"))
+      SLet _ ->
+        pure ()
+  constrainType mv (TypeMetaVar Type (ann e'))
+  pure (ListComp mv e' stmts')
 elaborateExpType (Case () scrutinee alts) = do
   patMv <- fresh
   expMv <- fresh
@@ -2214,6 +2252,7 @@ class Ann a where
   ann :: a ann -> ann
 
 instance Ann (Exp kind) where
+  ann (ListComp x _ _)     = x
   ann (Var x _)            = x
   ann (Do x _)             = x
   ann (Lit x _)            = x
@@ -2534,6 +2573,19 @@ tupleTest
       lint = Lit () . LitInt
       appE = App ()
 
+listCompTest :: IO ()
+listCompTest
+  = testInferType
+  [ Decl () [ Binding () "test" [ Var () "x" ]
+                $ ListComp () (Var () "foo")
+                    [ SExp (App () (Var () "even") (Var () "x"))
+--                  , SBind (Var () "x") (App () (Var () "[]") (Lit () (LitInt 1)))
+                    , SLet [ Decl () [ Binding () "foo" [] (Var () "x") ] ]
+                    ]
+            ]
+  ] -- where
+    --   lint = Lit () . LitInt
+    --   appE = App ()
 listTest :: IO ()
 listTest
   = testInferType
