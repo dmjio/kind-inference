@@ -3030,6 +3030,7 @@ tt = testInferType
   , dec dollar
   , dec lamInt
   , dec asEx
+  , dec doublay
   ]
   where
     idFunc     = b "id" [ v "x" ] (v "x")
@@ -3042,17 +3043,27 @@ tt = testInferType
     dollar     = b "($)" [ v "f", v "x" ] (v "f" `appE` v "x")
     lamInt     = b "lamInt" [] (lam [ v "x" ] (v "x") `appE` lint 100)
     asEx       = b "asExp" [as "foo" (lint 1)] (v "foo")
+    doublay    = b "both" [] $ lett [ dec (b "f" [] (v "id")) ]
+                                 (appE
+                                   (appE (tc "(,)")
+                                     (appE (v "f") (char 'a')))
+                                     (appE (v "f") (lint 1)))
 
     appE   = App ()
     b      = Binding ()
     dec    = Decl () . pure
     v      = Var ()
+    tc x   = Con () x []
     lint   = Lit () . LitInt
     char   = Lit () . LitChar
     str    = Lit () . LitString
     double = Lit () . LitDouble
     lam    = Lam ()
     as     = As ()
+    lett   = Let ()
+
+-- both = let f = id in (f 'a', f 1)
+
 
 testInferType :: [Decl Kind ()] -> IO ()
 testInferType decls = do
