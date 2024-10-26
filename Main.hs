@@ -89,6 +89,7 @@ data Exp kind typ
   | ListComp typ (Exp kind typ) [Stmt kind typ]
   | Sequence typ (Exp kind typ) (Maybe (Exp kind typ)) (Maybe (Exp kind typ))
   | PrefixNegation typ (Exp kind typ)
+  | LabeledUpdate typ (Exp kind typ) [(Name, Exp kind typ)]
   deriving (Show, Eq)
 
 data Stmt kind typ
@@ -1039,6 +1040,8 @@ instance Substitution a => Substitution (Maybe a) where
   freeVars (Just x) = freeVars x
 
 instance Substitution a => Substitution (Exp kind a) where
+  freeVars (LabeledUpdate _ e kvs) =
+    freeVars e <> freeVars (map snd kvs) <> S.fromList (map fst kvs)
   freeVars (PrefixNegation _ e) =
     freeVars e
   freeVars (Sequence _ e s f) =
@@ -1200,6 +1203,13 @@ substituteAltType (AltGd l gds ds) = do
 substituteExpType
   :: Exp Kind MetaVar
   -> Infer (Exp Kind (Type Kind))
+substituteExpType (LabeledUpdate mv e kvs) = do
+  typ <- getType mv
+  kvs_ <- forM kvs $ \(k,v) -> do
+    v_ <- substituteExpType v
+    pure (k,v_)
+  e_ <- substituteExpType e
+  pure (LabeledUpdate typ e_ kvs_)
 substituteExpType (PrefixNegation mv e) = do
   typ <- getType mv
   e_ <- substituteExpType e
@@ -1451,6 +1461,12 @@ substituteExp (Sequence () e s f) = do
 substituteExp (PrefixNegation () e) = do
   e_ <- substituteExp e
   pure (PrefixNegation () e_)
+substituteExp (LabeledUpdate () e kvs) = do
+  kvs_ <- forM kvs $ \(k,v) -> do
+    v_ <- substituteExp v
+    pure (k,v_)
+  e_ <- substituteExp e
+  pure (LabeledUpdate () e_ kvs_)
 
 substituteExpStmt
   :: Stmt MetaVar ()
@@ -1740,6 +1756,12 @@ elaborateExp
 elaborateExp (PrefixNegation () e) = do
   e_ <- elaborateExp e
   pure (PrefixNegation () e_)
+elaborateExp (LabeledUpdate () e kvs) = do
+  kvs_ <- forM kvs $ \(k,v) -> do
+    v_ <- elaborateExp v
+    pure (k,v_)
+  e_ <- elaborateExp e
+  pure (LabeledUpdate () e_ kvs_)
 elaborateExp (Var () n) = do
   pure (Var () n)
 elaborateExp (Lit () n) = do
@@ -1885,6 +1907,16 @@ elaborateExpType (PrefixNegation () e) = do
   e_ <- elaborateExpType e
   constrainType (ann e_) (TypeCon Type (TyCon "Int"))
   pure (PrefixNegation (ann e_) e_)
+elaborateExpType (LabeledUpdate () e kvs) = do
+  e_ <- elaborateExpType e -- Person
+  kvs_ <- forM kvs $ \(k,v) -> do
+    v_ <- elaborateExpType v -- String
+    kmv <- lookupNamedType k -- String -> Person
+    constrainType kmv
+      (TypeMetaVar Type (ann v_) --> TypeMetaVar Type (ann e_))
+      -- TODO: get the correct kinds here, ann should have Kind returned
+    pure (k,v_)
+  pure (LabeledUpdate (ann e_) e_ kvs_)
 elaborateExpType (Sequence () e ms mf) = do
   a <- fresh
   e' <- elaborateExpType e
@@ -2321,6 +2353,7 @@ class Ann a where
 
 instance Ann (Exp kind) where
   ann (PrefixNegation x _)         = x
+  ann (LabeledUpdate x _ _)        = x
   ann (Sequence x _ _ _)           = x
   ann (ListComp x _ _)             = x
   ann (Var x _)                    = x
