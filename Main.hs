@@ -8,6 +8,7 @@ import           Data.Function
 import           Data.List
 import           Data.Map             (Map)
 import qualified Data.Map             as M
+import           Data.Maybe
 import           Data.Set             (Set)
 import qualified Data.Set             as S
 import           Prelude              hiding (maybe)
@@ -728,10 +729,6 @@ showConDecl (ConDecl n ts t) =
 solve :: Infer ()
 solve = do
   dbg "Solving..."
-  dumpConstraints
-  dumpEnv
-  dumpTypeEnv
-  dbg "Done dumping constraints"
   sortConstraints
   solveConstraints
 
@@ -770,6 +767,7 @@ solveConstraints = do
       applyType k v = do
         updateSubstitutionType k v
         updateConstraintsType k v
+        -- updateTypeEnv k v
 
       classConstraint p =
         dbg ("Solving class constraint for type: " <> show p)
@@ -955,9 +953,17 @@ updateSubstitutionType :: MetaVar -> Type Kind -> Infer ()
 updateSubstitutionType m k = modifyTypeSub (M.map replaceInState . M.insert m k)
   where
     replaceInState = cataType $ \t ->
-      case t of
-        TypeMetaVar _ mv | mv == m -> k
-        z                          -> z
+        case t of
+          TypeMetaVar _ mv | mv == m -> k
+          z                          -> z
+
+updateTypeEnv :: MetaVar -> Type Kind -> Infer ()
+updateTypeEnv m k = modifyTypeEnv (M.map replaceInState)
+  where
+    replaceInState (TypeScheme vs t) = TypeScheme vs (cataType go t)
+      where
+        go (TypeMetaVar _ mv) | mv == m = k
+        go x = x
 
 class MetaVars a where
   metaVars :: a -> Set MetaVar
@@ -966,6 +972,10 @@ instance MetaVars Kind where
   metaVars (KindMetaVar mv) = S.singleton mv
   metaVars (KindFun k1 k2)  = metaVars k1 `S.union` metaVars k2
   metaVars _ = mempty
+
+instance MetaVars TypeScheme where
+  metaVars (TypeScheme _ t) =
+    metaVars t
 
 instance MetaVars (Type Kind) where
   metaVars (TypeApp _ t1 t2) = metaVars t1 `S.union` metaVars t2
@@ -1104,6 +1114,13 @@ modifySub :: (Subst -> Subst) -> Infer ()
 modifySub f = do
   subs <- gets substitutions
   modify $ \s -> s { substitutions = f subs }
+
+
+modifyTypeEnv
+  :: (Map Name TypeScheme -> Map Name TypeScheme) -> Infer ()
+modifyTypeEnv f = do
+  e <- gets typeEnv
+  modify $ \s -> s { typeEnv = f e }
 
 type SubstTyped = Map MetaVar (Type Kind)
 
@@ -1565,6 +1582,9 @@ defaultKindEnv = M.fromList
 
 runInfer :: Infer a -> IO (Either Error a)
 runInfer m = evalStateT (runExceptT m) emptyState
+
+runInferWith :: InferState -> Infer a -> IO (Either Error a)
+runInferWith s m = evalStateT (runExceptT m) s
 
 dbg :: MonadIO m => String -> m ()
 dbg s = when shouldDebug $ liftIO (putStrLn s)
@@ -2050,13 +2070,11 @@ elaborateExpType (IfThenElse () cond e1 e2) = do
   constrainType mv (TypeMetaVar Type(ann e2'))
   pure (IfThenElse mv cond' e1' e2')
 elaborateExpType (Let () decs e) = do
-  mv <- fresh
   vars <- uncurry zip <$> populateEnv decs
   decs' <- traverse elaborateDeclType decs
   generalizeLet vars
   e' <- elaborateExpType e
-  constrainType mv (TypeMetaVar Type(ann e'))
-  pure (Let mv decs' e')
+  pure (Let (ann e') decs' e')
 elaborateExpType (LeftSection () e n) = do
   mv <- fresh
   e_ <- elaborateExpType e
@@ -2091,16 +2109,34 @@ elaborateExpType (List () es) = do
   constrainType con (TypeMetaVar Type mv)
   pure (List con es_)
 
+-- z = let { f x y = let { g = x y } in g } in (,) (f ((+)1) 1) (f (const 'a') 'b')
+
 generalizeLet :: [(Name, MetaVar)] -> Infer ()
 generalizeLet vars = do
   dbg "Generalizing Let"
-  solve -- this will force any type errors
+  solve
+  ctx <- S.fromList . M.elems <$> gets env
   typeSubs <- gets typeSubstitutions
   forM_ vars $ \(name, mv) ->
-     case M.lookup mv typeSubs of
-       Nothing -> throwError (CouldntFindSubstitution name mv)
-       -- TODO: ^ is this possible? we probably don't need this
-       Just t -> addToTypeEnv name (generalizeType t)
+     case typeSubs M.! mv of
+       TypeMetaVar{} ->
+         pure ()
+       t -> do
+         addToTypeEnv name
+           $ applySubs typeSubs
+           $ generalizeTypeIgnoringEnv ctx t
+  where
+    applySubs
+      :: Map MetaVar (Type Kind)
+      -> TypeScheme
+      -> TypeScheme
+    applySubs subs (TypeScheme vs t) = TypeScheme vs (cataType go t)
+      where
+        go (TypeMetaVar k m) =
+          case M.lookup m subs of
+            Nothing -> TypeMetaVar k m
+            Just z -> z
+        go x = x
 
 elaborateLit :: Lit -> Infer MetaVar
 elaborateLit LitInt{} = do
@@ -2295,7 +2331,7 @@ lookupNamedType named = do
   let name = getName named
   typEnv <- gets typeEnv
   case M.lookup name typEnv of
-    Just scheme -> do
+    Just scheme ->
       instantiateType name scheme
     Nothing -> do
       env <- gets env
@@ -2424,16 +2460,23 @@ generalizeBinding :: Binding Kind (Type Kind) -> TypeScheme
 generalizeBinding = generalizeType . ann
 
 generalizeType :: Type Kind -> TypeScheme
-generalizeType typ = TypeScheme vars type'
+generalizeType = generalizeTypeIgnoringEnv mempty
+
+generalizeTypeIgnoringEnv :: Set MetaVar -> Type Kind -> TypeScheme
+generalizeTypeIgnoringEnv ctx typ = TypeScheme vars type'
   where
-    metavars = S.toList (metaVars typ)
+    metavars = S.toList (metaVars typ `S.difference` ctx)
     mapping  = zip (sort metavars) [0..]
     subs     = M.fromList mapping
     oldVars  = S.toList (freeVars typ)
     vars     = S.toList (freeVars type')
     type'    = cataType quantify typ
 
-    quantify (TypeMetaVar k m) = TypeVar k (TyVar (showT (subs M.! m)))
+    quantify (TypeMetaVar k m) =
+      case M.lookup m subs of
+        Nothing -> TypeMetaVar k m
+        Just m' -> TypeVar k (TyVar (showT m'))
+
     quantify k                 = k
 
     showT :: Int -> String
@@ -2699,6 +2742,35 @@ arithSeqTest
             ]
   ]
 
+-- z :: Int
+-- z =
+--   let
+--     f x y = let g = x y in g
+--   in
+--     f (+1) 1
+
+-- let f = (\ x y -> let g = x y in g) in f (\z -> z) 0
+
+-- z = let { f x y = let { g = x y } in g } in ((f ((+)1)) 1, f (const 'a') 'b')
+-- z = let { f x y = let { g = x y } in g } in (,) (f ((+)1)) 1
+-- TODO: figure out why 'f' isn't being instantiated to two different types
+sample :: IO ()
+sample = testInferType [ constD, decl ]
+  where
+    decl = d [ b "z" [] body ]
+    body = l [ d [ b "f" [ v "x", v "y" ] lbody ] ] appf
+    lbody = l [ d [ b "g" [ ] (ap' (v "x") (v "y")) ] ] (v "g")
+    appf = ap' (ap' (v "f") (rs "(+)" (lit 1))) (lit 1)
+      -- ap'
+      --   (ap' (v "(,)") (ap' (ap' (v "f") (rs "(+)" (lit 1))) (lit 1)))
+      --     (ap' (ap' (v "f") (ap' (v "const") (c 'a'))) (c 'b'))
+    d = Decl ()
+    b = Binding ()
+    l = Let ()
+    v = Var ()
+    ap' = App ()
+    rs = RightSection ()
+    lit = Lit () . LitInt
 
 listCompTest :: IO ()
 listCompTest
@@ -2706,13 +2778,12 @@ listCompTest
   [ Decl () [ Binding () "test" [ Var () "x" ]
                 $ ListComp () (Var () "foo")
                     [ SExp (App () (Var () "even") (Var () "x"))
---                  , SBind (Var () "x") (App () (Var () "[]") (Lit () (LitInt 1)))
+                    -- , SBind (Var () "x") (App () (Var () "[]") (Lit () (LitInt 1)))
                     , SLet [ Decl () [ Binding () "foo" [] (Var () "x") ] ]
                     ]
             ]
-  ] -- where
-    --   lint = Lit () . LitInt
-    --   appE = App ()
+  ]
+
 listTest :: IO ()
 listTest
   = testInferType
@@ -2931,15 +3002,18 @@ negtest = testInferType
 
 
 constDecStr :: IO ()
-constDecStr = testInferType
-  [ Decl ()
+constDecStr = testInferType [ constD ]
+
+constD :: Decl Kind ()
+constD =
+    Decl ()
       [ Binding () "const"
           [ Var () "x"
           , TypeAnn tString (Wildcard ())
           ]
           (Var () "x")
       ]
-  ]
+
 
 tString :: Type Kind
 tString = TypeCon Type (TyCon "String")
