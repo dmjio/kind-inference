@@ -91,6 +91,7 @@ data Exp kind typ
   | Sequence typ (Exp kind typ) (Maybe (Exp kind typ)) (Maybe (Exp kind typ))
   | PrefixNegation typ (Exp kind typ)
   | LabeledUpdate typ (Exp kind typ) [(Name, Exp kind typ)]
+  | Irrefutable typ (Exp kind typ)
   deriving (Show, Eq)
 
 data Stmt kind typ
@@ -587,6 +588,8 @@ showExpVar (Do _ stmts) =
       | s <- stmts
       ]
     ]
+showExpVar (Irrefutable _ e) =
+  "~" <> showExp e
 showExpVar (ListComp _ e stmts) =
   brackets $ intercalate " "
     [ showExp e
@@ -1050,6 +1053,7 @@ instance Substitution a => Substitution (Maybe a) where
   freeVars (Just x) = freeVars x
 
 instance Substitution a => Substitution (Exp kind a) where
+  freeVars (Irrefutable _ e) = freeVars e
   freeVars (LabeledUpdate _ e kvs) =
     freeVars e <> freeVars (map snd kvs) <> S.fromList (map fst kvs)
   freeVars (PrefixNegation _ e) =
@@ -1227,6 +1231,10 @@ substituteExpType (LabeledUpdate mv e kvs) = do
     pure (k,v_)
   e_ <- substituteExpType e
   pure (LabeledUpdate typ e_ kvs_)
+substituteExpType (Irrefutable mv e) = do
+  typ <- getType mv
+  e_ <- substituteExpType e
+  pure (Irrefutable typ e_)
 substituteExpType (PrefixNegation mv e) = do
   typ <- getType mv
   e_ <- substituteExpType e
@@ -1484,6 +1492,9 @@ substituteExp (LabeledUpdate () e kvs) = do
     pure (k,v_)
   e_ <- substituteExp e
   pure (LabeledUpdate () e_ kvs_)
+substituteExp (Irrefutable () e) = do
+  e_ <- substituteExp e
+  pure (Irrefutable () e_)
 
 substituteExpStmt
   :: Stmt MetaVar ()
@@ -1845,6 +1856,9 @@ elaborateExp (Sequence () e s f) = do
   s_ <- traverse elaborateExp s
   f_ <- traverse elaborateExp f
   pure (Sequence () e_ s_ f_)
+elaborateExp (Irrefutable () e) = do
+  e_ <- elaborateExp e
+  pure (Irrefutable () e_)
 
 elaborateStmt
   :: Stmt () ()
@@ -2014,6 +2028,9 @@ elaborateExpType (Do () stmts) = do
     _ -> throwError LastDoStmtMustBeExp
   pure (Do mv stmts_)
 
+elaborateExpType (Irrefutable () e) = do
+  e_ <- elaborateExpType e
+  pure (Irrefutable (ann e_) e_)
 elaborateExpType (Lit () lit) = do
   mv <- elaborateLit lit
   pure (Lit mv lit)
@@ -2388,27 +2405,28 @@ class Ann a where
   ann :: a ann -> ann
 
 instance Ann (Exp kind) where
-  ann (PrefixNegation x _)         = x
-  ann (LabeledUpdate x _ _)        = x
-  ann (Sequence x _ _ _)           = x
-  ann (ListComp x _ _)             = x
-  ann (Var x _)                    = x
-  ann (Do x _)                     = x
-  ann (Lit x _)                    = x
-  ann (App x _ _)                  = x
-  ann (Case x _ _)                 = x
-  ann (Lam x _ _)                  = x
-  ann (As x _ _)                   = x
-  ann (Con x _ _)                  = x
-  ann (Wildcard x)                 = x
-  ann (TypeAnn _ x)                = ann x
-  ann (Let x _ _)                  = x
-  ann (IfThenElse x _ _ _)         = x
-  ann (Fail x)                     = x
-  ann (LeftSection x _ _)          = x
-  ann (RightSection x _ _)         = x
-  ann (Tuple x _)                  = x
-  ann (List x _)                   = x
+  ann (Irrefutable x _)     = x
+  ann (PrefixNegation x _)  = x
+  ann (LabeledUpdate x _ _) = x
+  ann (Sequence x _ _ _)    = x
+  ann (ListComp x _ _)      = x
+  ann (Var x _)             = x
+  ann (Do x _)              = x
+  ann (Lit x _)             = x
+  ann (App x _ _)           = x
+  ann (Case x _ _)          = x
+  ann (Lam x _ _)           = x
+  ann (As x _ _)            = x
+  ann (Con x _ _)           = x
+  ann (Wildcard x)          = x
+  ann (TypeAnn _ x)         = ann x
+  ann (Let x _ _)           = x
+  ann (IfThenElse x _ _ _)  = x
+  ann (Fail x)              = x
+  ann (LeftSection x _ _)   = x
+  ann (RightSection x _ _)  = x
+  ann (Tuple x _)           = x
+  ann (List x _)            = x
 
 instance Ann Type where
   ann (TypeVar x _)   = x
@@ -3031,6 +3049,7 @@ tt = testInferType
   , dec lamInt
   , dec asEx
   , dec doublay
+  , dec irref
   ]
   where
     idFunc     = b "id" [ v "x" ] (v "x")
@@ -3048,6 +3067,8 @@ tt = testInferType
                                    (appE (tc "(,)")
                                      (appE (v "f") (char 'a')))
                                      (appE (v "f") (lint 1)))
+    irref = b "ref" [ Irrefutable () (v "x") ] (TypeAnn tString (v "x"))
+
 
     appE   = App ()
     b      = Binding ()
