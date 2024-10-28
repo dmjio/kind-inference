@@ -51,7 +51,7 @@ data Binding kind typ
   deriving (Show, Eq)
 
 class Fun a where
-  infixr 9 -->
+  infixr 4 -->
   (-->) :: a -> a -> a
 
 instance Fun Kind where
