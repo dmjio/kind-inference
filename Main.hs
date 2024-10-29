@@ -71,6 +71,7 @@ data Exp kind typ
   | Lit typ Lit
   | App typ (Exp kind typ) (Exp kind typ)
   | Lam typ [Exp kind typ] (Exp kind typ)
+  | InfixOp (Exp kind typ) Name (Exp kind typ)
   -- Patterns
   | As typ Name (Pat kind typ)
   | Con typ Name [Pat kind typ]
