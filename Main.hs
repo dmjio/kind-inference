@@ -71,7 +71,7 @@ data Exp kind typ
   | Lit typ Lit
   | App typ (Exp kind typ) (Exp kind typ)
   | Lam typ [Exp kind typ] (Exp kind typ)
-  | InfixOp (Exp kind typ) Name (Exp kind typ)
+  | InfixOp typ (Exp kind typ) Name (Exp kind typ)
   -- Patterns
   | As typ Name (Pat kind typ)
   | Con typ Name [Pat kind typ]
@@ -589,6 +589,10 @@ showExpVar (Do _ stmts) =
       | s <- stmts
       ]
     ]
+showExpVar (InfixOp _ l n r) = do
+  let unparen ('(':c:")") = [c]
+      unparen x = x
+  showExp l <> " " <> unparen n <> " " <> showExp r
 showExpVar (Irrefutable _ e) =
   "~" <> showExp e
 showExpVar (ListComp _ e stmts) =
@@ -1054,6 +1058,7 @@ instance Substitution a => Substitution (Maybe a) where
   freeVars (Just x) = freeVars x
 
 instance Substitution a => Substitution (Exp kind a) where
+  freeVars (InfixOp _ l _ r) = freeVars l <> freeVars r
   freeVars (Irrefutable _ e) = freeVars e
   freeVars (LabeledUpdate _ e kvs) =
     freeVars e <> freeVars (map snd kvs) <> S.fromList (map fst kvs)
@@ -1281,6 +1286,11 @@ substituteExpType (App mv f x) = do
   fun <- substituteExpType f
   arg <- substituteExpType x
   pure (App typ fun arg)
+substituteExpType (InfixOp mv e1 n e2) = do
+  typ <- getType mv
+  e1_ <- substituteExpType e1
+  e2_ <- substituteExpType e2
+  pure (InfixOp typ e1_ n e2_)
 substituteExpType (Lam mv args body) = do
   typ <- getType mv
   args' <- traverse substituteExpType args
@@ -1423,6 +1433,10 @@ substituteExp
   -> Infer (Exp Kind ())
 substituteExp (Var () n) =
   pure (Var () n)
+substituteExp (InfixOp () e1 n e2) = do
+  e1_ <- substituteExp e1
+  e2_ <- substituteExp e2
+  pure (InfixOp () e1_ n e2_)
 substituteExp (Lit () n) =
   pure (Lit () n)
 substituteExp (Tuple () es) = do
@@ -1785,6 +1799,10 @@ elaborateBindingType (Binding () name args body) = do
 elaborateExp
   :: Exp () ()
   -> Infer (Exp MetaVar ())
+elaborateExp (InfixOp () e1 n e2) = do
+  e1_ <- elaborateExp e1
+  e2_ <- elaborateExp e2
+  pure (InfixOp () e1_ n e2_)
 elaborateExp (PrefixNegation () e) = do
   e_ <- elaborateExp e
   pure (PrefixNegation () e_)
@@ -1935,6 +1953,17 @@ elaborateStmtType (SLet decls) = do
 elaborateExpType
   :: Exp Kind ()
   -> Infer (Exp Kind MetaVar)
+elaborateExpType (InfixOp () e1 name e2) = do
+  mv <- fresh
+  op <- lookupNamedType name
+  e1_ <- elaborateExpType e1
+  e2_ <- elaborateExpType e2
+  constrainType op $
+    foldr (-->) (TypeMetaVar Type mv)
+      [ TypeMetaVar Type (ann e1_)
+      , TypeMetaVar Type (ann e2_)
+      ]
+  pure (InfixOp mv e1_ name e2_)
 elaborateExpType (Var () name) = do
   mv <- lookupNamedType name
   pure (Var mv name)
@@ -2406,6 +2435,7 @@ class Ann a where
   ann :: a ann -> ann
 
 instance Ann (Exp kind) where
+  ann (InfixOp x _ _ _)     = x
   ann (Irrefutable x _)     = x
   ann (PrefixNegation x _)  = x
   ann (LabeledUpdate x _ _) = x
@@ -2963,6 +2993,15 @@ loll = testInferType
         ]
       ]
   ]
+
+infixex :: IO ()
+infixex = testInferType
+  [ Decl ()
+      [ Binding () "foo" [ Var () "x" ] $
+          InfixOp () (Lit () (LitInt 1)) "(+)" (Var () "x")
+      ]
+  ]
+
 
 
 -- Inferred types...
