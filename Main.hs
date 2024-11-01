@@ -40,6 +40,12 @@ data Decl kind typ
   | Decl typ [Binding kind typ]
   deriving (Show, Eq)
 
+data Instance
+  = Inst
+  { instanceConstraints :: [Pred (Type Kind)]
+  , instanceHead :: Pred (Type Kind)
+  } deriving (Eq, Show)
+
 data Fixity
   = Infix
   | Infixl
@@ -305,11 +311,16 @@ data InferState
   { env               :: Map Name MetaVar
   , kindEnv           :: Map Name Scheme
   , typeEnv           :: Map Name TypeScheme
+  , classes           :: Map ClassName [SuperClass]
+  , instances         :: Map ClassName [Instance]
   , substitutions     :: Map MetaVar Kind
   , typeSubstitutions :: Map MetaVar (Type Kind)
   , var               :: Int
   , constraints       :: [Constraint]
   } deriving (Show, Eq)
+
+type ClassName = String
+type SuperClass = String
 
 type Subst = Map MetaVar Kind
 type Infer = ExceptT Error (StateT InferState IO)
@@ -824,10 +835,12 @@ bail e = do
   liftIO (print e)
   throwError e
 
+type Sub = (MetaVar, Type Kind)
+
 unifyType
   :: Type Kind
   -> Type Kind
-  -> Infer (Maybe (MetaVar, Type Kind))
+  -> Infer (Maybe Sub)
 unifyType (TypeVar k1 x) (TypeVar k2 y)
   | x == y = do
       kindCheck k1 k2
@@ -1566,7 +1579,10 @@ substituteType (TypeMetaVar k mv) =
   pure (TypeMetaVar k mv)
 
 emptyState :: InferState
-emptyState = InferState mempty defaultKindEnv defaultTypeEnv mempty mempty 0 []
+emptyState =
+  InferState mempty defaultKindEnv
+    defaultTypeEnv mempty mempty
+      mempty mempty 0 []
 
 defaultTypeEnv :: Map String TypeScheme
 defaultTypeEnv = M.fromList
@@ -3179,3 +3195,39 @@ inferKinds decls = runInfer $ do
     (scheme, decl) <- inferKind d
     addToKindEnv decl scheme
     decl <$ reset
+
+-- entailment
+bySuper :: Pred a -> Infer [Pred a]
+bySuper (Pred className t) = do
+  superClasses <- getSuperclasses className
+  cs <-
+    forM superClasses $ \superClass ->
+      bySuper (Pred superClass t)
+  pure (Pred className t : concat cs)
+
+getSuperclasses
+  :: ClassName
+  -> Infer [ClassName]
+getSuperclasses name = do
+  result <- M.lookup name <$> gets classes
+  pure $ case result of
+    Nothing -> []
+    Just cs -> cs
+
+getInstances
+  :: ClassName
+  -> Infer [Instance]
+getInstances name = do
+  result <- M.lookup name <$> gets instances
+  pure (case result of
+    Nothing -> []
+    Just is -> is)
+
+scEntail :: Eq a => [Pred a] -> Pred a -> Infer Bool
+scEntail ps p = do
+  supers <- traverse bySuper ps
+  pure (any (p `elem`) supers)
+
+getPredType :: Pred a -> Type a
+getPredType (Pred _ t) = t
+
