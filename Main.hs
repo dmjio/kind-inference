@@ -3231,3 +3231,22 @@ scEntail ps p = do
 getPredType :: Pred a -> Type a
 getPredType (Pred _ t) = t
 
+
+isHnf :: Pred a -> Bool
+isHnf (Pred _ t) = hnf t
+  where
+    hnf TypeCon{}       = False
+    hnf TypeMetaVar{}   = True
+    hnf TypeVar{}       = False
+    hnf (TypeApp _ x _) = hnf x
+    hnf (TypeFun _ x _) = hnf x
+
+concatMapM
+  :: (Traversable t, Applicative f)
+  => (a -> f [b])
+  -> t a
+  -> f [b]
+concatMapM f xs =
+  concat <$>
+    traverse f xs
+
