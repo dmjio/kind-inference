@@ -75,6 +75,7 @@ instance Fun (Type Kind) where
 data Exp kind typ
   = Var typ Name
   | Lit typ Lit
+  | PrimOp typ Name
   | App typ (Exp kind typ) (Exp kind typ)
   | Lam typ [Exp kind typ] (Exp kind typ)
   | InfixOp typ (Exp kind typ) Name (Exp kind typ)
@@ -1071,6 +1072,7 @@ instance Substitution a => Substitution (Maybe a) where
   freeVars (Just x) = freeVars x
 
 instance Substitution a => Substitution (Exp kind a) where
+  freeVars (PrimOp _ n) = S.singleton n
   freeVars (InfixOp _ l _ r) = freeVars l <> freeVars r
   freeVars (Irrefutable _ e) = freeVars e
   freeVars (LabeledUpdate _ e kvs) =
@@ -1282,6 +1284,9 @@ substituteExpType (RightSection mv name e) = do
 substituteExpType (Var mv name) = do
   typ <- getType mv
   pure (Var typ name)
+substituteExpType (PrimOp mv name) = do
+  typ <- getType mv
+  pure (PrimOp typ name)
 substituteExpType (Case mv e alts) = do
   typ <- getType mv
   e_ <- substituteExpType e
@@ -1446,6 +1451,8 @@ substituteExp
   -> Infer (Exp Kind ())
 substituteExp (Var () n) =
   pure (Var () n)
+substituteExp (PrimOp () n) =
+  pure (PrimOp () n)
 substituteExp (InfixOp () e1 n e2) = do
   e1_ <- substituteExp e1
   e2_ <- substituteExp e2
@@ -1830,6 +1837,8 @@ elaborateExp (LabeledUpdate () e kvs) = do
   pure (LabeledUpdate () e_ kvs_)
 elaborateExp (Var () n) = do
   pure (Var () n)
+elaborateExp (PrimOp () n) =
+  pure (PrimOp () n)
 elaborateExp (Lit () n) = do
   pure (Lit () n)
 elaborateExp (App () e1 e2) = do
@@ -1983,6 +1992,9 @@ elaborateExpType (InfixOp () e1 name e2) = do
 elaborateExpType (Var () name) = do
   mv <- lookupNamedType name
   pure (Var mv name)
+elaborateExpType (PrimOp () name) = do
+  mv <- lookupNamedType name
+  pure (PrimOp mv name)
 elaborateExpType (PrefixNegation () e) = do
   e_ <- elaborateExpType e
   constrainType (ann e_) (TypeCon Type (TyCon "Int"))
@@ -2458,6 +2470,7 @@ instance Ann (Exp kind) where
   ann (Sequence x _ _ _)    = x
   ann (ListComp x _ _)      = x
   ann (Var x _)             = x
+  ann (PrimOp x _)          = x
   ann (Do x _)              = x
   ann (Lit x _)             = x
   ann (App x _ _)           = x
