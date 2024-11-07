@@ -835,13 +835,13 @@ unifyType t1@(TypeMetaVar _ x) t2@(TypeMetaVar _ y)
       pure Nothing
 unifyType t1@(TypeApp _ x1 y1) t2@(TypeApp _ x2 y2) = do
   kindCheck t1 t2
-  constrainTypes x1 x2
-  constrainTypes y1 y2
+  constrain x1 x2
+  constrain y1 y2
   pure Nothing
 unifyType t1@(TypeFun _ x1 y1) t2@(TypeFun _ x2 y2) = do
   kindCheck t1 t2
-  constrainTypes x1 x2
-  constrainTypes y1 y2
+  constrain x1 x2
+  constrain y1 y2
   pure Nothing
 unifyType (TypeMetaVar k x) y = metaVarBindType k x y
 unifyType x (TypeMetaVar k y) = metaVarBindType k y x
@@ -854,8 +854,8 @@ unifyKind Constraint Constraint = pure Nothing
 unifyKind (KindVar x) (KindVar y) | x == y = pure Nothing
 unifyKind (KindMetaVar x) (KindMetaVar y) | x == y = pure Nothing
 unifyKind (KindFun x1 y1) (KindFun x2 y2) = do
-  constrainKinds x1 x2
-  constrainKinds y1 y2
+  constrain x1 x2
+  constrain y1 y2
   pure Nothing
 unifyKind (KindMetaVar x) y = metaVarBind x y
 unifyKind x (KindMetaVar y) = metaVarBind y x
@@ -1727,14 +1727,14 @@ elaborateConDeclType
   -> Infer (Type Kind) (ConDecl Kind MetaVar)
 elaborateConDeclType t (ConDecl name typs ()) = do
   mv <- fresh
-  constrainTypes
-    (TypeMetaVar Type mv)
+  constrainMeta
+    mv
     (foldr (-->) t typs)
   pure (ConDecl name typs mv)
 elaborateConDeclType t (ConDeclRec name fields ()) = do
   mv <- fresh
-  constrainTypes
-    (TypeMetaVar Type mv)
+  constrainMeta
+    mv
     (foldr (-->) t (snd <$> fields))
   pure (ConDeclRec name fields mv)
 
@@ -1786,7 +1786,7 @@ elaborateBindingType (Binding () name args body) = do
   void $ populateEnv $ S.toList (freeVars args)
   args' <- traverse elaborateExpType args
   body' <- elaborateExpType body
-  constrainType mv $
+  constrainMeta mv $
     foldr tFun (TypeMetaVar Type (ann body'))
     (TypeMetaVar Type . ann <$> args')
   pure (Binding mv name args' body')
@@ -1955,7 +1955,7 @@ elaborateExpType (InfixOp () e1 name e2) = do
   op <- lookupNamedType name
   e1_ <- elaborateExpType e1
   e2_ <- elaborateExpType e2
-  constrainType op $
+  constrainMeta op $
     foldr (-->) (TypeMetaVar Type mv)
       [ TypeMetaVar Type (ann e1_)
       , TypeMetaVar Type (ann e2_)
@@ -1969,14 +1969,14 @@ elaborateExpType (PrimOp () name) = do
   pure (PrimOp mv name)
 elaborateExpType (PrefixNegation () e) = do
   e_ <- elaborateExpType e
-  constrainType (ann e_) (TypeCon Type (TyCon "Int"))
+  constrainMeta (ann e_) (TypeCon Type (TyCon "Int"))
   pure (PrefixNegation (ann e_) e_)
 elaborateExpType (LabeledUpdate () e kvs) = do
   e_ <- elaborateExpType e -- Person
   kvs_ <- forM kvs $ \(k,v) -> do
     v_ <- elaborateExpType v -- String
     kmv <- lookupNamedType k -- String -> Person
-    constrainType kmv
+    constrainMeta kmv
       (TypeMetaVar Type (ann v_) --> TypeMetaVar Type (ann e_))
       -- TODO: get the correct kinds here, ann should have Kind returned
     pure (k,v_)
@@ -1986,13 +1986,13 @@ elaborateExpType (Sequence () e ms mf) = do
   e' <- elaborateExpType e
   ms' <- traverse elaborateExpType ms
   mf' <- traverse elaborateExpType mf
-  constrainType a (TypeMetaVar Type (ann e'))
+  constrainMeta a (TypeMetaVar Type (ann e'))
   forM_ ms' $ \x ->
-    constrainType a (TypeMetaVar Type (ann x))
+    constrainMeta a (TypeMetaVar Type (ann x))
   forM_ mf' $ \x ->
-    constrainType a (TypeMetaVar Type (ann x))
+    constrainMeta a (TypeMetaVar Type (ann x))
   mv <- fresh
-  constrainType mv $
+  constrainMeta mv $
     TypeApp Type
      (TypeCon (Type --> Type) (TyCon "[]"))
      (TypeMetaVar Type a)
@@ -2020,21 +2020,21 @@ elaborateExpType (Case () scrutinee alts) = do
   forM_ alts_ $ \alt ->
     case alt of
       Alt pat ex _ -> do
-        constrainType patMv (TypeMetaVar Type (ann pat))
-        constrainType expMv (TypeMetaVar Type (ann ex))
+        constrainMeta patMv (TypeMetaVar Type (ann pat))
+        constrainMeta expMv (TypeMetaVar Type (ann ex))
       AltGd pat guards _ -> do
-        constrainType patMv (TypeMetaVar Type (ann pat))
+        constrainMeta patMv (TypeMetaVar Type (ann pat))
         forM_ guards $ \(Guards stmts e) -> do
-          constrainType expMv (TypeMetaVar Type (ann e))
+          constrainMeta expMv (TypeMetaVar Type (ann e))
           forM_ stmts $ \stmt ->
             case stmt of
               SBind p_ e_ ->
-                constrainType (ann p_) (TypeMetaVar Type (ann e_))
+                constrainMeta (ann p_) (TypeMetaVar Type (ann e_))
               SExp e_ ->
-                constrainType (ann e_) (TypeCon Type (TyCon "Bool"))
+                constrainMeta (ann e_) (TypeCon Type (TyCon "Bool"))
               SLet _ ->
                 pure ()
-  constrainType patMv (TypeMetaVar Type (ann scrutinee_))
+  constrainMeta patMv (TypeMetaVar Type (ann scrutinee_))
   pure (Case expMv scrutinee_ alts_)
 elaborateExpType (Do () stmts) = do
   mv <- fresh
@@ -2046,11 +2046,11 @@ elaborateExpType (Do () stmts) = do
         m <- fresh
         a <- fresh
         let ma = TypeApp Type (TypeMetaVar (Type --> Type) m) (TypeMetaVar Type a)
-        constrainType a (TypeMetaVar Type (ann p))
-        constrainTypes ma (TypeMetaVar Type (ann e))
-        constrainType mv ma
+        constrainMeta a (TypeMetaVar Type (ann p))
+        constrain ma (TypeMetaVar Type (ann e))
+        constrainMeta mv ma
       SExp e -> do
-        constrainType mv (TypeMetaVar Type (ann e))
+        constrainMeta mv (TypeMetaVar Type (ann e))
       SLet _ ->
         pure ()
   case last stmts_ of
