@@ -40,6 +40,33 @@ data Decl kind typ
   | Decl typ [Binding kind typ]
   deriving (Show, Eq)
 
+-- data Core
+--   = App_ Core Core
+--   | Lam_ String Core
+--   | Var_ String
+--   | Con_ String
+--   | Case_ Core [(Core, Core)]
+--   deriving (Show, Eq)
+
+-- desugar :: Binding Kind (Type Kind) -> IO Core
+-- desugar (Binding _ name vars exp) = do
+--   e <- dsExp exp
+--   pure e
+
+-- dsExp :: Exp Kind (Type Kind) -> IO Core
+-- dsExp (Var _ s) = pure (Var_ s)
+-- dsExp (App _ e1 e2) =
+--   App_ <$> dsExp e1 <*> dsExp e2
+-- dsExp (IfThenElse _ c e1 e2) = do
+--   c_ <- dsExp c
+--   e1_ <- dsExp e1
+--   e2_ <- dsExp e2
+--   pure $
+--     Case_ c_
+--     [ (Con_ "True", e1_)
+--     , (Con_ "False", e2_)
+--     ]
+
 data Instance
   = Inst
   { instanceConstraints :: [Pred (Type Kind)]
