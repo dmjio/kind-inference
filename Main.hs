@@ -424,8 +424,8 @@ showDecl (Data a n vars xs) =
   , if null (showAnn a)
     then n
     else parens (n <> " :: " <> showAnn a)
-  , intercalate " " (showTypeVar <$> vars)
-  , case xs of
+  , intercalate " " (showTypeVar <$> vars) <>
+    case xs of
       [] -> ""
       y : ys ->
         concat
@@ -449,8 +449,7 @@ showDecl (Class a supers p decls) =
     then showPred p
     else parens (showPred p <> " :: " <> showAnn a)
   , "where"
-  , beforeAll "\n  " (showDecl <$> decls)
-  ]
+  ] ++ beforeAll "\n  " (showDecl <$> decls)
 showDecl (Instance ps p decl) =
   intercalate " "
   [ "instance"
