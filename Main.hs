@@ -2531,6 +2531,18 @@ annKind (Foreign _ _)           = Type
 annKind (Decl _ _)              = Type
 annKind (Fixity _ _ _)          = error "no kind for fixity declaration"
 
+class FromMetaVar m where
+  fromMetaVar :: MetaVar -> m
+
+instance FromMetaVar MetaVar where
+  fromMetaVar = id
+
+instance FromMetaVar Kind where
+  fromMetaVar = KindMetaVar
+
+instance FromMetaVar (Type a) where
+  fromMetaVar = TypeMetaVar Type
+
 class Constrain a where
   constrain :: a -> a -> Infer a ()
   constrainMeta :: MetaVar -> a -> Infer a ()
