@@ -129,6 +129,8 @@ data Exp kind typ
   | Irrefutable typ (Exp kind typ)
   deriving (Show, Eq)
 
+type Guard kind typ = Stmt kind typ
+
 data Stmt kind typ
   = SBind (Pat kind typ) (Exp kind typ)
   | SExp (Exp kind typ)
@@ -141,7 +143,7 @@ data Alt kind typ
   deriving (Show, Eq)
 
 data Guards kind typ
-  = Guards [Stmt kind typ] (Exp kind typ)
+  = Guards [Guard kind typ] (Exp kind typ)
   deriving (Show, Eq)
 
 type Pat typ kind = Exp typ kind
