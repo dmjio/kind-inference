@@ -1,5 +1,5 @@
 {-# LANGUAGE NoMonomorphismRestriction #-}
-module Main where
+module KindInference where
 
 import           Control.Monad
 import           Control.Monad.Except
@@ -39,33 +39,6 @@ data Decl kind typ
   | Fixity Fixity (Maybe Int) [Name]
   | Decl typ [Binding kind typ]
   deriving (Show, Eq)
-
--- data Core
---   = App_ Core Core
---   | Lam_ String Core
---   | Var_ String
---   | Con_ String
---   | Case_ Core [(Core, Core)]
---   deriving (Show, Eq)
-
--- desugar :: Binding Kind (Type Kind) -> IO Core
--- desugar (Binding _ name vars exp) = do
---   e <- dsExp exp
---   pure e
-
--- dsExp :: Exp Kind (Type Kind) -> IO Core
--- dsExp (Var _ s) = pure (Var_ s)
--- dsExp (App _ e1 e2) =
---   App_ <$> dsExp e1 <*> dsExp e2
--- dsExp (IfThenElse _ c e1 e2) = do
---   c_ <- dsExp c
---   e1_ <- dsExp e1
---   e2_ <- dsExp e2
---   pure $
---     Case_ c_
---     [ (Con_ "True", e1_)
---     , (Con_ "False", e2_)
---     ]
 
 data Instance
   = Inst
@@ -270,6 +243,9 @@ cataType :: (Type a -> Type a) -> Type a -> Type a
 cataType f (TypeFun x l r) = f $ TypeFun x (cataType f l) (cataType f r)
 cataType f (TypeApp x l r) = f $ TypeApp x (cataType f l) (cataType f r)
 cataType f x = f x
+
+foo :: Show a => a -> Int
+foo = undefined
 
 showType :: ShowAnn ann => Type ann -> String
 showType t = showType_ (cataType fun t)
@@ -814,15 +790,15 @@ popConstraint = do
     [] ->
       pure Nothing
 
-kindCheck :: Show a => HasKind a => a -> a -> Infer a ()
+kindCheck :: (Generalize a, Show a) => HasKind a => a -> a -> Infer a ()
 kindCheck k1 k2 =
   when (hasKind k1 /= hasKind k2) $
     bail (UnificationFailed k1 k2)
 
-bail :: Show a => Error a -> Infer a b
+bail :: Generalize a => Show a => Error a -> Infer a b
 bail e = do
   dump "bailing out"
-  -- liftIO (print e)
+  liftIO (print e)
   throwError e
 
 type Sub a = (MetaVar, a)
@@ -1117,7 +1093,7 @@ instance Substitution (Type a) where
   freeVars _ = mempty
 
 occursCheck
-  :: (MetaVars a, Substitution a, Show a)
+  :: (Generalize a, MetaVars a, Substitution a, Show a)
   => MetaVar
   -> a
   -> Infer a ()
@@ -1642,7 +1618,7 @@ dbg s = when shouldDebug $ liftIO (putStrLn s)
 shouldDebug :: Bool
 shouldDebug = True
 
--- TODO: instead of this, return [TypeScheme] from `inferType`
+-- TODO: instead of this, return [TypeScheme] from `inferKind`
 -- so you can add all the variants to the typeEnv
 addConstructorsAndFields
   :: [Decl Kind () ]
@@ -2268,7 +2244,7 @@ elaborate (Data () name vars variants) = do
   pure (Data mv name vars' vs)
 elaborate (Newtype () name vars variant) = do
   mv <- addToEnv name
-  handleKindSig  name mv
+  handleKindSig name mv
   (_, mvs) <- fmap (fmap KindMetaVar) <$> populateEnv (getName <$> vars)
   vars' <- traverse elaborateType vars
   v <- elaborateConDecl variant
@@ -2322,7 +2298,7 @@ elaborateBinding (Binding () name pats e) = do
   ex <- elaborateExp e
   pure (Binding () name ps ex)
 
-checkInstanceHead :: Show a => [Pred ()] -> Pred () -> Infer a ()
+checkInstanceHead :: (Generalize a, Show a) => [Pred ()] -> Pred () -> Infer a ()
 checkInstanceHead supers ctx =
   forM_ supers $ \superPred ->
     forM_ (freeVars ctx `S.difference` freeVars superPred) $ \x ->
@@ -2390,7 +2366,7 @@ lookupKindEnv name = do
     _ -> pure Nothing
 
 lookupName
-  :: (Instantiate a, GetName name, Show a)
+  :: (Generalize a, Instantiate a, GetName name, Show a)
   => name
   -> Infer a MetaVar
 lookupName named = do
@@ -2405,7 +2381,7 @@ lookupName named = do
         Just v -> pure v
 
 lookupNamedType
-  :: (Instantiate a, GetName name, Show a)
+  :: (Generalize a, Instantiate a, GetName name, Show a)
   => name
   -> Infer a MetaVar
 lookupNamedType named = do
@@ -2670,6 +2646,53 @@ main = testInfer
   , cofree
   , functor
   , typeSig
+  , nested
+  ]
+
+testPolyRec = do
+  Right decls <- inferKinds
+    [ nested
+    ]
+  ds <- inferTypes $ do
+   concat
+    [ decls
+    , [ TypeSig "lengthE" [] lengthNestType ] -- comment this out for poly rec failure :+1:
+    , pure $ Decl ()
+      [ Binding () "lengthE"
+        [ InfixOp () (Wildcard ()) "(:<:)" (Var () "xs")
+        ]
+        (App () (App () (Var () "(+)") (Lit () (LitInt 1)))
+          (App () (Var () "lengthE") (Var () "xs")))
+      ]
+    ]
+  case ds of
+    Left e -> print e
+    Right xs -> mapM_ print xs
+  where
+   lengthNestType =
+     (TypeApp Type
+       (TypeCon (Type --> Type) (TyCon "Nested"))
+       (TypeVar Type (TyVar "a"))) --> (TypeCon Type (TyCon "Int"))
+  
+-- data Nested a = a :<: (Nested [a]) | Epsilon
+
+-- lengthE :: Nested a -> Int
+-- lengthE (_ :<: xs) = 1 + lengthE xs
+
+-- KindInference.hs:2678:1-35: error: [GHC-25897] …
+--     • Couldn't match type ‘a1’ with ‘[a1]’
+--       Expected: Nested [a1] -> a2
+--         Actual: Nested a1 -> a2
+--       ‘a1’ is a rigid type variable bound by
+--         the inferred type of lengthE :: Nested [a1] -> a2
+--         at /home/dmjio/Desktop/kind-inference/KindInference.hs:2678:1-35
+
+
+-- polymorphic recursive type
+nested :: Decl () ()
+nested = Data () "Nested" [ tVar "a" ]
+  [ ConDecl "(:<:)" [ tVar "a", app (tCon "Nested") (tList (tVar "a")) ] ()
+  , ConDecl "Epsilon" [] ()
   ]
 
 int :: Decl () ()
@@ -2744,6 +2767,9 @@ tVarT n = TypeVar Type (TyVar n)
 
 tCon :: String -> Type ()
 tCon n = TypeCon () (TyCon n)
+
+tList :: Type () -> Type ()
+tList t = app (tCon "[]") t
 
 tVar :: String -> Type ()
 tVar n = TypeVar () (TyVar n)
@@ -3247,6 +3273,7 @@ reset =
       , var = 0
       }
 
+-- You need to run dependency analysis here, infer kinds in chunks
 inferKinds :: [Decl () ()] -> IO (Either (Error Kind) [Decl Kind ()])
 inferKinds decls = runInferWith emptyStateKind $ do
   addKindSigs decls
